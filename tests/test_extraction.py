@@ -1,0 +1,94 @@
+from types import SimpleNamespace
+
+from materials_synthesis_agent.literature.extraction import estimate_extraction_cost, extract_protocol
+from materials_synthesis_agent.literature.retrieval import Paper
+from materials_synthesis_agent.schema import Target
+
+
+def make_target():
+    return Target(
+        functional_groups=["imine"],
+        linkage_chemistry="imine condensation",
+        application="CO2 capture",
+        metric_name="crystallinity",
+        metric_measurement_method="PXRD",
+    )
+
+
+def make_paper():
+    return Paper(source_id="10.1234/fake", title="A fake COF synthesis paper", abstract="...", year=2024, url="http://x", source="semantic_scholar")
+
+
+class FakeToolUseBlock:
+    type = "tool_use"
+
+    def __init__(self, input_data):
+        self.input = input_data
+
+
+class FakeClient:
+    def __init__(self, tool_input):
+        self._tool_input = tool_input
+        self.last_call_kwargs = None
+
+        class _Messages:
+            def create(inner_self, **kwargs):
+                self.last_call_kwargs = kwargs
+                return SimpleNamespace(content=[FakeToolUseBlock(self._tool_input)])
+
+        self.messages = _Messages()
+
+
+def test_dry_run_returns_cost_without_calling_anything():
+    target, paper = make_target(), make_paper()
+    cost = extract_protocol(target, paper, dry_run=True)
+    assert isinstance(cost, float)
+    assert cost > 0
+
+
+def test_estimate_extraction_cost_scales_with_text_length():
+    target = make_target()
+    short = make_paper()
+    long_paper = Paper(**{**short.__dict__, "abstract": short.abstract * 200})
+    assert estimate_extraction_cost(target, long_paper) > estimate_extraction_cost(target, short)
+
+
+def test_extract_protocol_grounds_cited_fields_and_flags_inferred():
+    target, paper = make_target(), make_paper()
+    tool_input = {
+        "found_protocol": True,
+        "building_blocks": {
+            "TAPB": {"value": "SMILES1", "excerpt": "TAPB was used as the amine node", "inferred": False},
+            "PDA": {"value": "SMILES2", "excerpt": None, "inferred": True},
+        },
+        "stoichiometry": {},
+        "solvent": {"value": "dioxane/mesitylene 1:1", "excerpt": "dioxane and mesitylene (1:1 v/v)", "inferred": False},
+        "modulator": None,
+        "temperature_c": {"value": "120", "excerpt": "heated at 120 C", "inferred": False},
+        "time_hours": None,
+        "concentration_molar": None,
+    }
+    candidate = extract_protocol(target, paper, client=FakeClient(tool_input))
+
+    assert candidate is not None
+    assert candidate.building_blocks["TAPB"].citation is not None
+    assert candidate.building_blocks["TAPB"].inferred is False
+    assert candidate.building_blocks["PDA"].citation is None
+    assert candidate.building_blocks["PDA"].inferred is True
+    assert candidate.solvent.citation.excerpt == "dioxane and mesitylene (1:1 v/v)"
+    assert candidate.modulator is None
+    assert 0 < candidate.citation_coverage() <= 1
+
+
+def test_extract_protocol_returns_none_when_paper_has_no_protocol():
+    target, paper = make_target(), make_paper()
+    tool_input = {"found_protocol": False}
+    result = extract_protocol(target, paper, client=FakeClient(tool_input))
+    assert result is None
+
+
+def test_extract_protocol_forces_the_tool_choice():
+    target, paper = make_target(), make_paper()
+    client = FakeClient({"found_protocol": False})
+    extract_protocol(target, paper, client=client)
+    assert client.last_call_kwargs["tool_choice"] == {"type": "tool", "name": "record_protocol"}

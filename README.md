@@ -8,8 +8,11 @@ as you report back lab results — recommends the next experiment to run.
 Runs entirely on your own machine, against your own LLM API key. No account, no login, no data
 leaves your machine except the literature/LLM API calls you explicitly trigger.
 
-> **Status: pre-implementation.** Scope and architecture are defined (see below); the code itself has
-> not been written yet. This README describes the intended v0.1 behavior.
+> **Status: v0.1 and v0.2 implemented and tested.** Literature retrieval + citation-grounded
+> extraction, RDKit feasibility checking, single- and multi-objective Bayesian optimization, the
+> CLI, and a minimal local web UI are all real, working code with a 42-test suite (`pytest`, all
+> passing). Retrosynthesis (AiZynthFinder) is written but **not verified live** -- see the
+> Known limitations section below before relying on it.
 
 ## Why
 
@@ -59,14 +62,46 @@ blindly — especially for reagents, quantities, and conditions you haven't inde
 
 ## Getting started
 
-Not yet runnable — see `ROADMAP.md` for the v0.1 milestone. Once available:
+Not yet published to PyPI -- install from source. Requires **Python 3.12** (see Known limitations).
 
 ```bash
-pip install materials-synthesis-agent
+git clone <this-repo-url> && cd materials-synthesis-agent
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[web]"
+
 export ANTHROPIC_API_KEY=...   # your own key; calls go directly from your machine
-materials-agent init my-cof-project
-materials-agent suggest-protocols
+materials-agent init my-cof-project              # prompts for your target, writes parameter_space.json
+# edit my-cof-project/parameter_space.json to match your real synthesis parameters
+materials-agent suggest-protocols my-cof-project # searches literature, shows cost estimate, confirms before spending
+materials-agent log-result my-cof-project <candidate-id> --value 0.7 --uncertainty 0.05
+materials-agent suggest-next my-cof-project      # Bayesian-optimization recommendation
+
+# or run the local web UI instead of the CLI:
+materials-agent serve my-cof-project             # http://127.0.0.1:8000, local only, no auth
 ```
+
+Run the test suite with `pytest` (42 tests, no API key needed -- LLM calls are covered with a fake
+client, see `tests/test_extraction.py`).
+
+## Known limitations (found during development, not yet resolved)
+
+- **Requires Python 3.12, not newer.** `torch` has no wheel for Python 3.14 in a standard pip index
+  as of this writing; the venv setup above pins 3.12 deliberately.
+- **`torch` is pinned `<2.3`, and `numpy`/`scipy` are pinned below their normal versions to match.**
+  torch 2.2.x is built against the NumPy 1.x ABI; newer scipy (a botorch dependency) requires NumPy
+  2. See the comment in `pyproject.toml` next to these pins -- revisit once a NumPy-2-compatible
+  torch build is available in your install environment.
+- **Retrosynthesis (`feasibility/retrosynthesis.py`) is unverified.** `pip install aizynthfinder`
+  itself failed in this project's development environment (a `llvmlite` wheel build failure -- a
+  real, observed failure, not hypothetical), and using it for real also needs a separate multi-GB
+  `download_public_data` step regardless. The adapter is written against AiZynthFinder's documented
+  API with a fully lazy import (nothing else breaks if it's not installed), but treat it as a
+  starting point, not a working integration, until you've exercised it yourself.
+- **The literature/extraction pipeline has not made a real LLM call.** No Anthropic API key was
+  available in the environment this was built in. The extraction and cost-estimation logic is
+  covered by tests against a fake client (`tests/test_extraction.py`) and the retrieval half is
+  verified against the real Semantic Scholar/arXiv APIs, but the full literature-to-protocol path
+  needs your own key to confirm end to end.
 
 ## Documentation
 
