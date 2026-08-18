@@ -10,9 +10,9 @@ leaves your machine except the literature/LLM API calls you explicitly trigger.
 
 > **Status: v0.1 and v0.2 implemented and tested.** Literature retrieval + citation-grounded
 > extraction, RDKit feasibility checking, single- and multi-objective Bayesian optimization, the
-> CLI, and a minimal local web UI are all real, working code with a 42-test suite (`pytest`, all
-> passing). Retrosynthesis (AiZynthFinder) is written but **not verified live** -- see the
-> Known limitations section below before relying on it.
+> CLI, and a minimal local web UI are all real, working code with a 46-test suite (`pytest`, all
+> passing). Retrosynthesis (AiZynthFinder) installs cleanly and its API surface is confirmed
+> against the real package, but no real search has been run yet -- see Known limitations below.
 
 ## Why
 
@@ -80,10 +80,11 @@ materials-agent suggest-next my-cof-project      # Bayesian-optimization recomme
 materials-agent serve my-cof-project             # http://127.0.0.1:8000, local only, no auth
 ```
 
-Run the test suite with `pytest` (42 tests, no API key needed -- LLM calls are covered with a fake
-client, see `tests/test_extraction.py`).
+Run the test suite with `pytest` (46 tests, no API key needed -- LLM calls are covered with a fake
+client, see `tests/test_extraction.py`). Retrosynthesis tests (`tests/test_retrosynthesis.py`) run
+automatically if you've installed the `retrosynthesis` extra, and skip cleanly if you haven't.
 
-## Known limitations (found during development, not yet resolved)
+## Known limitations (found during development)
 
 - **Requires Python 3.12, not newer.** `torch` has no wheel for Python 3.14 in a standard pip index
   as of this writing; the venv setup above pins 3.12 deliberately.
@@ -91,12 +92,19 @@ client, see `tests/test_extraction.py`).
   torch 2.2.x is built against the NumPy 1.x ABI; newer scipy (a botorch dependency) requires NumPy
   2. See the comment in `pyproject.toml` next to these pins -- revisit once a NumPy-2-compatible
   torch build is available in your install environment.
-- **Retrosynthesis (`feasibility/retrosynthesis.py`) is unverified.** `pip install aizynthfinder`
-  itself failed in this project's development environment (a `llvmlite` wheel build failure -- a
-  real, observed failure, not hypothetical), and using it for real also needs a separate multi-GB
-  `download_public_data` step regardless. The adapter is written against AiZynthFinder's documented
-  API with a fully lazy import (nothing else breaks if it's not installed), but treat it as a
-  starting point, not a working integration, until you've exercised it yourself.
+- **Retrosynthesis now installs and its API surface is confirmed, but no real search has been
+  run.** `pip install "materials-synthesis-agent[retrosynthesis]"` failed at first -- `aizynthfinder`
+  pulls in `numba` unconstrained, which resolves to a `numba` version requiring an `llvmlite`
+  release with no prebuilt wheel for Intel macOS, forcing a from-source build that needs the LLVM
+  toolchain. Fixed by pinning `numba<0.61` (see the comment in `pyproject.toml`), which resolves
+  the whole tree to real wheels. With that fix, `aizynthfinder` installs cleanly, and
+  `feasibility/retrosynthesis.py`'s use of `AiZynthFinder`'s constructor, `.stock`/
+  `.expansion_policy.select()`, and `.routes.dicts` is now confirmed against the real installed
+  package (`tests/test_retrosynthesis.py`) -- not guessed. What's **still** unverified: a real
+  tree search needs `download_public_data <dir>`, a separate multi-GB fetch of pretrained model
+  weights and stock data, which hasn't been done. The exact stock/policy name strings passed to
+  `.select()` and the exact `extract_statistics()` key used for "solved" status are educated
+  guesses at AiZynthFinder's typical public-data naming, not confirmed against a real config.yml.
 - **The literature/extraction pipeline has not made a real LLM call.** No Anthropic API key was
   available in the environment this was built in. The extraction and cost-estimation logic is
   covered by tests against a fake client (`tests/test_extraction.py`) and the retrieval half is

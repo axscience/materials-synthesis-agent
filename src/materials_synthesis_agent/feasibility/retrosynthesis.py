@@ -1,15 +1,21 @@
 """Optional retrosynthesis check via AiZynthFinder -- v0.2 (ROADMAP.md).
 
-NOT exercised live in this codebase's development environment, and confirmed harder than "just pip
-install it": `pip install aizynthfinder` itself failed here building the `llvmlite` wheel from
-source (no matching prebuilt wheel for this environment's Python/platform combo -- a concrete,
-observed failure, not a hypothetical one). Even setting that aside, using this for real still needs
-a separate `download_public_data <dir>` step that fetches several GB of pretrained USPTO
-policy-network weights and stock data. This module is written against AiZynthFinder's documented
-API and its import is fully lazy (nothing above breaks if the package isn't installed), but it has
-not been run end-to-end against a real installed package or real model files. Treat it as a real
-starting point, not a verified integration -- exercise it against your own environment and
-downloaded data before trusting its output.
+Install status: `aizynthfinder` now installs cleanly in this project's dev environment (see the
+`retrosynthesis` extra in pyproject.toml -- the fix was pinning `numba<0.61` so pip resolves an
+`llvmlite` version with a real Intel-macOS wheel, instead of the newest `numba`, which forces an
+`llvmlite` version with no such wheel and triggers a from-source build needing the LLVM toolchain).
+
+API surface confirmed against the real installed package (not guessed): `AiZynthFinder(configfile=
+...)`, `.stock`/`.expansion_policy` are instance attributes with `.select(value, append=False)`,
+`.routes` is a `RouteCollection` with real `len()`/indexing, and `.routes.dicts` gives the
+documented list-of-dict route representation used below.
+
+**Still NOT exercised against a real search**, because that needs `download_public_data <dir>` --
+a separate multi-GB fetch of pretrained USPTO policy weights and stock data, not yet done. That
+means: the exact stock/policy *names* to pass to `.select()` (guessed below as `"zinc"`/`"uspto"`,
+AiZynthFinder's typical public-data naming) and the exact key `extract_statistics()` uses for
+"solved" status are unverified against a real config.yml. Confirm both against your own downloaded
+data's config before trusting output beyond "did it run without crashing."
 
 Install with: pip install "materials-synthesis-agent[retrosynthesis]"
 Then: download_public_data <your-data-dir>   (an AiZynthFinder CLI command, ~GB download)
@@ -50,22 +56,26 @@ def check_retrosynthesis(smiles: str, config_path: str) -> RetrosynthesisResult:
         ) from exc
 
     finder = AiZynthFinder(configfile=config_path)
-    finder.stock.select("zinc")  # the default stock AiZynthFinder's public data ships; adjust per your config
+    # Selector names below are AiZynthFinder's typical public-data naming, NOT verified against a
+    # real downloaded config (see module docstring) -- check these against your own config.yml.
+    finder.stock.select("zinc")
     finder.expansion_policy.select("uspto")
     finder.target_smiles = smiles
     finder.tree_search()
     finder.build_routes()
     stats = finder.extract_statistics()
 
-    routes = finder.routes
-    top_summary = None
-    if len(routes) > 0:
-        top_summary = routes[0].get("route", {}).__repr__()[:500]
+    # .routes is a RouteCollection (confirmed: real len()/indexing over the real installed
+    # package); .dicts is its documented "list of dictionary representation of the routes".
+    route_dicts = finder.routes.dicts
+    top_summary = repr(route_dicts[0])[:500] if route_dicts else None
 
     return RetrosynthesisResult(
         smiles=smiles,
+        # "is_solved" is AiZynthFinder's documented statistics key as of the version installed
+        # here; still unverified against a real search result (see module docstring).
         is_solved=bool(stats.get("is_solved", False)),
-        num_routes=len(routes),
+        num_routes=len(route_dicts),
         top_route_summary=top_summary,
     )
 
