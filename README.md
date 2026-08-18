@@ -8,11 +8,13 @@ as you report back lab results — recommends the next experiment to run.
 Runs entirely on your own machine, against your own LLM API key. No account, no login, no data
 leaves your machine except the literature/LLM API calls you explicitly trigger.
 
-> **Status: v0.1 and v0.2 implemented and tested.** Literature retrieval + citation-grounded
-> extraction, RDKit feasibility checking, single- and multi-objective Bayesian optimization, the
-> CLI, and a minimal local web UI are all real, working code with a 46-test suite (`pytest`, all
-> passing). Retrosynthesis (AiZynthFinder) installs cleanly and its API surface is confirmed
-> against the real package, but no real search has been run yet -- see Known limitations below.
+> **Status: v0.1 and v0.2 implemented, tested, and fully wired end to end.** Literature retrieval +
+> citation-grounded extraction, RDKit feasibility checking, single- and multi-objective Bayesian
+> optimization, retrosynthesis (AiZynthFinder), the CLI, and a minimal local web UI are all real,
+> working code with a 49-test suite (`pytest`, all passing). Retrosynthesis has been run for real
+> against actual COF-relevant chemistry (see `tests/test_retrosynthesis.py::TestRealSearch`) --
+> it correctly proposed nitro-group reduction as the route to a diamine linker, the standard real
+> synthesis for that kind of compound, not a random disconnection.
 
 ## Why
 
@@ -31,7 +33,10 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
    every field it asserts. Anything it infers rather than reads directly is flagged `inferred`, never
    presented as sourced fact.
 2. **Feasibility checker** — validates building blocks with RDKit, checks commercial availability,
-   and flags (not silently drops) protocols built on infeasible components.
+   and flags (not silently drops) protocols built on infeasible components. Optionally, once you've
+   run `materials-agent setup-retrosynthesis`, a non-purchasable block gets a real retrosynthesis
+   search (AiZynthFinder) instead of just a dead-end flag — a candidate route to purchasable
+   starting materials, if one exists.
 3. **You run it in the lab** and report back what happened — including your metric's measurement
    uncertainty. A result without a stated uncertainty is accepted but flagged low-confidence
    everywhere it's used downstream.
@@ -45,8 +50,6 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
 
 - No lab automation or robotics — you execute the synthesis yourself. (A future integration with
   automated lab hardware is a plausible later direction, not this project's current scope.)
-- No retrosynthesis planning in v0.1 — feasibility is validity + purchasability only; retrosynthesis
-  (e.g. AiZynthFinder integration) is planned for a later release, see `ROADMAP.md`.
 - No material classes beyond COFs yet, and no catalysis *computational* modeling (DFT/ML interatomic
   potentials) — see `ROADMAP.md` for what's planned versus explicitly out of scope.
 - No hosted/multi-user mode — that's a separate, closed-source product built on top of this package;
@@ -78,11 +81,20 @@ materials-agent suggest-next my-cof-project      # Bayesian-optimization recomme
 
 # or run the local web UI instead of the CLI:
 materials-agent serve my-cof-project             # http://127.0.0.1:8000, local only, no auth
+
+# optional: one-time retrosynthesis setup (shared across all local projects)
+pip install -e ".[retrosynthesis]"
+materials-agent setup-retrosynthesis             # shows the ~759 MB / 6-file breakdown, confirms, downloads
+# suggest-protocols now automatically uses it for non-purchasable building blocks
 ```
 
-Run the test suite with `pytest` (46 tests, no API key needed -- LLM calls are covered with a fake
-client, see `tests/test_extraction.py`). Retrosynthesis tests (`tests/test_retrosynthesis.py`) run
-automatically if you've installed the `retrosynthesis` extra, and skip cleanly if you haven't.
+Run the test suite with `pytest` (49 tests, no API key needed -- LLM calls are covered with a fake
+client, see `tests/test_extraction.py`). Retrosynthesis API-shape tests
+(`tests/test_retrosynthesis.py`) run automatically if you've installed the `retrosynthesis` extra,
+and skip cleanly if you haven't. The real end-to-end search tests
+(`tests/test_retrosynthesis.py::TestRealSearch`) additionally need `setup-retrosynthesis` to have
+been run — expect each to take 80-100+ seconds, since it's a genuine tree search against a real
+trained policy network, not a stub.
 
 ## Known limitations (found during development)
 
@@ -92,19 +104,21 @@ automatically if you've installed the `retrosynthesis` extra, and skip cleanly i
   torch 2.2.x is built against the NumPy 1.x ABI; newer scipy (a botorch dependency) requires NumPy
   2. See the comment in `pyproject.toml` next to these pins -- revisit once a NumPy-2-compatible
   torch build is available in your install environment.
-- **Retrosynthesis now installs and its API surface is confirmed, but no real search has been
-  run.** `pip install "materials-synthesis-agent[retrosynthesis]"` failed at first -- `aizynthfinder`
-  pulls in `numba` unconstrained, which resolves to a `numba` version requiring an `llvmlite`
-  release with no prebuilt wheel for Intel macOS, forcing a from-source build that needs the LLVM
-  toolchain. Fixed by pinning `numba<0.61` (see the comment in `pyproject.toml`), which resolves
-  the whole tree to real wheels. With that fix, `aizynthfinder` installs cleanly, and
-  `feasibility/retrosynthesis.py`'s use of `AiZynthFinder`'s constructor, `.stock`/
-  `.expansion_policy.select()`, and `.routes.dicts` is now confirmed against the real installed
-  package (`tests/test_retrosynthesis.py`) -- not guessed. What's **still** unverified: a real
-  tree search needs `download_public_data <dir>`, a separate multi-GB fetch of pretrained model
-  weights and stock data, which hasn't been done. The exact stock/policy name strings passed to
-  `.select()` and the exact `extract_statistics()` key used for "solved" status are educated
-  guesses at AiZynthFinder's typical public-data naming, not confirmed against a real config.yml.
+- **Retrosynthesis was resolved end to end during development -- now fully working, not a
+  known-limitation entry anymore, kept here as the paper trail.** `pip install
+  "materials-synthesis-agent[retrosynthesis]"` initially failed -- `aizynthfinder` pulls in `numba`
+  unconstrained, which resolves to a version requiring an `llvmlite` release with no prebuilt wheel
+  for Intel macOS, forcing a from-source build that needs the LLVM toolchain. Fixed by pinning
+  `numba<0.61` in the `retrosynthesis` extra. `materials-agent setup-retrosynthesis` then downloads
+  the real ~759 MB public data (6 files from Zenodo/figshare: USPTO expansion/ringbreaker/filter
+  policy models + a ZINC purchasable-stock database) and wires it in automatically -- `stock:
+  zinc` / `expansion: uspto` in the generated config.yml, confirmed to exactly match what
+  `feasibility/retrosynthesis.py` already called. Verified with real searches
+  (`tests/test_retrosynthesis.py::TestRealSearch`): correctly proposed nitro-group reduction as
+  the route to benzidine (a real COF/MOF diamine linker), which is the actual standard synthesis
+  for that class of compound -- not a plausible-looking guess. Each real search takes 80-100+
+  seconds (genuine MCTS against a trained policy network), so those tests are gated behind the
+  data being present and don't run in CI or on a fresh clone.
 - **The literature/extraction pipeline has not made a real LLM call.** No Anthropic API key was
   available in the environment this was built in. The extraction and cost-estimation logic is
   covered by tests against a fake client (`tests/test_extraction.py`) and the retrieval half is

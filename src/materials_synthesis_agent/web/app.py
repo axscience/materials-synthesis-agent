@@ -139,9 +139,10 @@ def suggest_protocols_run():
     target_id = proj.target_path(name).read_text().strip()
     target = store.get_target(target_id)
 
+    retrosynthesis_config = proj.get_global_retrosynthesis_config()
     candidates = generate_protocols(target, n=5)
     for c in candidates:
-        c.feasibility_flags = check_protocol_candidate(c)
+        c.feasibility_flags = check_protocol_candidate(c, retrosynthesis_config=retrosynthesis_config)
         store.save_protocol_candidate(c)
     store.close()
     return RedirectResponse("/", status_code=303)

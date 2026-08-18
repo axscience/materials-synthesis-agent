@@ -59,3 +59,39 @@ def load_parameter_space(name: str) -> list[ParameterSpec]:
         categories = tuple(item["categories"]) if "categories" in item else None
         specs.append(ParameterSpec(name=item["name"], kind=item["kind"], bounds=bounds, categories=categories))
     return specs
+
+
+# -- Global (cross-project) config -------------------------------------------------------------
+# Retrosynthesis model/stock data (~759 MB) is shared across every local project -- there's no
+# reason to redownload it per project, so its location lives outside any single project directory.
+
+def global_config_dir() -> Path:
+    return Path.home() / ".materials-agent"
+
+
+def global_config_path() -> Path:
+    return global_config_dir() / "config.json"
+
+
+def default_retrosynthesis_data_dir() -> Path:
+    return global_config_dir() / "retrosynthesis-data"
+
+
+def _read_global_config() -> dict:
+    path = global_config_path()
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def set_global_retrosynthesis_config(config_yml_path: str) -> None:
+    global_config_dir().mkdir(parents=True, exist_ok=True)
+    data = _read_global_config()
+    data["retrosynthesis_config"] = config_yml_path
+    global_config_path().write_text(json.dumps(data, indent=2))
+
+
+def get_global_retrosynthesis_config() -> str | None:
+    """Returns the configured retrosynthesis config.yml path, or None if setup-retrosynthesis
+    hasn't been run -- callers treat None as "retrosynthesis not available," not an error."""
+    return _read_global_config().get("retrosynthesis_config")

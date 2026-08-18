@@ -84,13 +84,25 @@ def check_building_block(name: str, smiles: str, verify_purchasability: bool = T
     return check
 
 
-def check_protocol_candidate(candidate) -> list[str]:
+def check_protocol_candidate(candidate, retrosynthesis_config: Optional[str] = None) -> list[str]:
     """Run feasibility checks over every building block on a ProtocolCandidate and return the
     flags to attach to `candidate.feasibility_flags`. Does not mutate the candidate -- the caller
-    decides how to apply the result, matching the append-only/versioned schema discipline."""
+    decides how to apply the result, matching the append-only/versioned schema discipline.
+
+    If `retrosynthesis_config` is given (a real config.yml path from `setup-retrosynthesis`), a
+    non-purchasable block gets a retrosynthesis check instead of just a dead-end flag -- see
+    `feasibility.retrosynthesis.check_building_block_with_retrosynthesis`. Left None (the
+    default), behavior is unchanged from before retrosynthesis existed.
+    """
     flags: list[str] = []
     for bb_name, field_value in candidate.building_blocks.items():
-        result = check_building_block(bb_name, field_value.value)
+        if retrosynthesis_config is not None:
+            from materials_synthesis_agent.feasibility.retrosynthesis import check_building_block_with_retrosynthesis
+
+            result = check_building_block_with_retrosynthesis(bb_name, field_value.value, retrosynthesis_config)
+        else:
+            result = check_building_block(bb_name, field_value.value)
+
         if not result.is_valid_structure:
             flags.append(f"{bb_name}: invalid structure -- {'; '.join(result.flags)}")
         elif not result.is_purchasable:

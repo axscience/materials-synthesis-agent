@@ -8,6 +8,8 @@ enforced locally the same way materials-copilot enforces it for hosted users.
 from __future__ import annotations
 
 import os
+import subprocess
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -83,9 +85,10 @@ def suggest_protocols(
     if not yes and not typer.confirm("Proceed?"):
         raise typer.Exit(0)
 
+    retrosynthesis_config = proj.get_global_retrosynthesis_config()
     candidates = generate_protocols(target, n=n)
     for candidate in candidates:
-        candidate.feasibility_flags = check_protocol_candidate(candidate)
+        candidate.feasibility_flags = check_protocol_candidate(candidate, retrosynthesis_config=retrosynthesis_config)
         store.save_protocol_candidate(candidate)
 
     store.record_usage("llm_call", estimated_cost, idempotency_key=f"suggest-protocols:{target.id}:{len(candidates)}")
@@ -234,6 +237,72 @@ def serve(
     os.environ["MATERIALS_AGENT_PROJECT"] = name
     console.print(f"Serving '{name}' at [bold]http://{host}:{port}[/bold] (local only, no auth)")
     uvicorn.run("materials_synthesis_agent.web.app:app", host=host, port=port)
+
+
+# Real sizes of AiZynthFinder's public data, confirmed via HEAD/range requests against the actual
+# Zenodo/figshare hosts -- not the "several GB" this project assumed before checking.
+_RETROSYNTHESIS_DOWNLOAD_FILES = [
+    ("uspto_model.onnx", "91.5 MB", "expansion policy"),
+    ("uspto_templates.csv.gz", "3.3 MB", "expansion policy"),
+    ("uspto_ringbreaker_model.onnx", "15.0 MB", "ringbreaker policy"),
+    ("uspto_ringbreaker_templates.csv.gz", "0.4 MB", "ringbreaker policy"),
+    ("uspto_filter_model.onnx", "16.8 MB", "filter policy"),
+    ("zinc_stock.hdf5", "632.4 MB", "purchasable-stock database"),
+]
+_RETROSYNTHESIS_TOTAL_SIZE = "~759 MB"
+
+
+@app.command()
+def setup_retrosynthesis(
+    data_dir: str = typer.Option(
+        None, help="Where to store the downloaded data (default: ~/.materials-agent/retrosynthesis-data)"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the download-size confirmation prompt."),
+):
+    """One-time download of AiZynthFinder's public policy/stock data, shared across all local
+    projects. After this, suggest-protocols automatically uses retrosynthesis for building blocks
+    that aren't confirmed purchasable."""
+    try:
+        import aizynthfinder  # noqa: F401
+    except ImportError:
+        console.print(
+            "[red]Install the retrosynthesis extra first:[/red] "
+            "pip install \"materials-synthesis-agent[retrosynthesis]\""
+        )
+        raise typer.Exit(1)
+
+    target_dir = proj.default_retrosynthesis_data_dir() if data_dir is None else Path(data_dir)
+    config_path = target_dir / "config.yml"
+
+    if config_path.exists():
+        console.print(f"Already set up at [bold]{config_path}[/bold].")
+        if not yes and not typer.confirm("Re-download anyway?"):
+            proj.set_global_retrosynthesis_config(str(config_path))
+            raise typer.Exit(0)
+
+    table = Table(title=f"Retrosynthesis public data ({_RETROSYNTHESIS_TOTAL_SIZE} total, from Zenodo + figshare)")
+    table.add_column("file")
+    table.add_column("size")
+    table.add_column("used for")
+    for filename, size, purpose in _RETROSYNTHESIS_DOWNLOAD_FILES:
+        table.add_row(filename, size, purpose)
+    console.print(table)
+
+    if not yes and not typer.confirm(f"Download {_RETROSYNTHESIS_TOTAL_SIZE} to {target_dir}?"):
+        raise typer.Exit(0)
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"Downloading to {target_dir} (this reuses AiZynthFinder's own download_public_data)...")
+    result = subprocess.run(["download_public_data", str(target_dir)])
+    if result.returncode != 0 or not config_path.exists():
+        console.print("[red]Download failed -- see output above.[/red]")
+        raise typer.Exit(1)
+
+    proj.set_global_retrosynthesis_config(str(config_path))
+    console.print(
+        f"[bold green]Done.[/bold green] Retrosynthesis configured at {config_path}. "
+        "suggest-protocols will use it automatically from now on."
+    )
 
 
 if __name__ == "__main__":
