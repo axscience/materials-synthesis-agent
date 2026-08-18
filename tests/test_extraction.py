@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 from materials_synthesis_agent.literature.extraction import estimate_extraction_cost, extract_protocol
 from materials_synthesis_agent.literature.retrieval import Paper
 from materials_synthesis_agent.schema import Target
@@ -19,24 +17,21 @@ def make_paper():
     return Paper(source_id="10.1234/fake", title="A fake COF synthesis paper", abstract="...", year=2024, url="http://x", source="semantic_scholar")
 
 
-class FakeToolUseBlock:
-    type = "tool_use"
-
-    def __init__(self, input_data):
-        self.input = input_data
-
-
 class FakeClient:
+    """Implements the provider-agnostic LLMClient interface (llm.base.LLMClient) directly --
+    extract_protocol() only ever calls .call_tool(), regardless of which of the 4 real providers
+    is configured, so a single fake exercises the same code path all of them go through."""
+
     def __init__(self, tool_input):
         self._tool_input = tool_input
         self.last_call_kwargs = None
 
-        class _Messages:
-            def create(inner_self, **kwargs):
-                self.last_call_kwargs = kwargs
-                return SimpleNamespace(content=[FakeToolUseBlock(self._tool_input)])
-
-        self.messages = _Messages()
+    def call_tool(self, prompt, tool_name, tool_description, tool_schema, max_tokens=2000):
+        self.last_call_kwargs = {
+            "prompt": prompt, "tool_name": tool_name, "tool_description": tool_description,
+            "tool_schema": tool_schema, "max_tokens": max_tokens,
+        }
+        return self._tool_input
 
 
 def test_dry_run_returns_cost_without_calling_anything():
@@ -87,8 +82,9 @@ def test_extract_protocol_returns_none_when_paper_has_no_protocol():
     assert result is None
 
 
-def test_extract_protocol_forces_the_tool_choice():
+def test_extract_protocol_calls_the_record_protocol_tool():
     target, paper = make_target(), make_paper()
     client = FakeClient({"found_protocol": False})
     extract_protocol(target, paper, client=client)
-    assert client.last_call_kwargs["tool_choice"] == {"type": "tool", "name": "record_protocol"}
+    assert client.last_call_kwargs["tool_name"] == "record_protocol"
+    assert "properties" in client.last_call_kwargs["tool_schema"]  # a real JSON Schema, not a stub

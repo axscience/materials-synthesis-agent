@@ -7,10 +7,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-import anthropic
-
-from materials_synthesis_agent.literature.extraction import DEFAULT_MODEL, extract_protocol
+from materials_synthesis_agent.literature.extraction import extract_protocol
 from materials_synthesis_agent.literature.retrieval import Paper, search
+from materials_synthesis_agent.llm import LLMClient
 from materials_synthesis_agent.schema import ProtocolCandidate, Target
 
 
@@ -18,7 +17,7 @@ def build_query(target: Target) -> str:
     return f"{target.linkage_chemistry} {' '.join(target.functional_groups)} synthesis {target.application}"
 
 
-def estimate_generation_cost(target: Target, papers: list[Paper], model: str = DEFAULT_MODEL) -> float:
+def estimate_generation_cost(target: Target, papers: list[Paper], model: Optional[str] = None) -> float:
     from materials_synthesis_agent.literature.extraction import estimate_extraction_cost
 
     return sum(estimate_extraction_cost(target, p, model=model) for p in papers)
@@ -27,8 +26,8 @@ def estimate_generation_cost(target: Target, papers: list[Paper], model: str = D
 def generate_protocols(
     target: Target,
     n: int = 5,
-    client: Optional[anthropic.Anthropic] = None,
-    model: str = DEFAULT_MODEL,
+    client: Optional[LLMClient] = None,
+    model: Optional[str] = None,
     search_limit: Optional[int] = None,
 ) -> list[ProtocolCandidate]:
     """Search for papers relevant to `target`, extract a protocol from each, and return up to `n`

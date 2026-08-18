@@ -16,9 +16,11 @@ from rich.console import Console
 from rich.table import Table
 
 from materials_synthesis_agent.cli import project as proj
+from materials_synthesis_agent.cli.llm_config import get_configured_provider, save_llm_config
 from materials_synthesis_agent.cli.params import params_to_new_candidate, protocol_to_params
 from materials_synthesis_agent.feasibility import check_protocol_candidate
 from materials_synthesis_agent.literature import build_query, estimate_generation_cost, generate_protocols, search
+from materials_synthesis_agent.llm import PROVIDERS
 from materials_synthesis_agent.optimize import LiteratureAnchor, Observation, ParameterSpace, SingleObjectiveOptimizer
 from materials_synthesis_agent.schema import Decision, Experiment, Metric, Target
 from materials_synthesis_agent.storage import Store
@@ -66,14 +68,52 @@ def init(
 
 
 @app.command()
+def configure():
+    """Choose an LLM provider and enter your API key -- one-time setup, shared across every local
+    project. The key is stored locally at ~/.materials-agent/config.json (readable only by you)
+    and is never sent anywhere except in requests to the provider you choose."""
+    console.print("[bold]Choose an LLM provider:[/bold]")
+    provider_keys = list(PROVIDERS.keys())
+    for i, key in enumerate(provider_keys, start=1):
+        config = PROVIDERS[key]
+        console.print(f"  {i}. {config.display_name} (default model: {config.default_model})")
+
+    choice = typer.prompt("Enter a number", type=int)
+    if not (1 <= choice <= len(provider_keys)):
+        console.print(f"[red]'{choice}' isn't one of the options above.[/red]")
+        raise typer.Exit(1)
+    provider = provider_keys[choice - 1]
+    config = PROVIDERS[provider]
+
+    console.print(
+        f"\nEnter your {config.display_name} API key (input hidden). "
+        f"You can also skip this step entirely and just set {config.env_var} in your shell."
+    )
+    api_key = typer.prompt("API key", hide_input=True)
+
+    model = typer.prompt(
+        f"Model to use (leave blank for the default, {config.default_model})", default="", show_default=False
+    )
+
+    save_llm_config(provider, api_key, model=model or None)
+    console.print(
+        f"\n[green]Configured.[/green] {config.display_name} "
+        f"({model or config.default_model}) will be used for suggest-protocols from now on."
+    )
+
+
+@app.command()
 def suggest_protocols(
     name: str,
     n: int = typer.Option(5, help="Number of candidate protocols to generate."),
     yes: bool = typer.Option(False, "--yes", help="Skip the cost-estimate confirmation prompt."),
 ):
     """Search the literature and extract N citation-grounded candidate protocols."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        console.print("[red]ANTHROPIC_API_KEY is not set.[/red] This command calls Claude for extraction; set your key and retry.")
+    if get_configured_provider() is None:
+        console.print(
+            "[red]No LLM provider configured.[/red] Run [bold]materials-agent configure[/bold] first, "
+            "or set one of: " + ", ".join(c.env_var for c in PROVIDERS.values())
+        )
         raise typer.Exit(1)
 
     store = Store(proj.db_path(name))

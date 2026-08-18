@@ -24,6 +24,9 @@ dependencies = [
     "rich>=13.7",
     "requests>=2.31",
     "anthropic>=0.34",
+    # Used natively for OpenAI, and via base_url override for xAI/Grok and Moonshot/Kimi (all
+    # three expose an OpenAI-compatible chat-completions + tool-calling surface) -- see llm/.
+    "openai>=1.0",
     "rdkit>=2024.3",
     # torch 2.2.x is compiled against the NumPy 1.x ABI; scipy>=1.13 requires NumPy>=2.0.
     # Until a torch build against NumPy 2 is available in your install environment, numpy and
