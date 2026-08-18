@@ -36,6 +36,14 @@ class MetricConfidence(str, Enum):
     LOW_CONFIDENCE = "low_confidence"
 
 
+class ObjectiveDirection(str, Enum):
+    """Whether the metric should be pushed up or down. Many materials metrics are minimize goals
+    (particle size, defect density, reaction time, cost), so this can't be assumed to be maximize."""
+
+    MAXIMIZE = "maximize"
+    MINIMIZE = "minimize"
+
+
 class Citation(BaseModel):
     """Provenance for a single extracted field."""
 
@@ -76,7 +84,12 @@ class Target(BaseModel):
     application: str
     metric_name: str
     metric_measurement_method: str
+    objective_direction: ObjectiveDirection = ObjectiveDirection.MAXIMIZE
     created_at: datetime = Field(default_factory=_now)
+
+    @property
+    def maximize(self) -> bool:
+        return self.objective_direction == ObjectiveDirection.MAXIMIZE
 
 
 class ProtocolCandidate(BaseModel):

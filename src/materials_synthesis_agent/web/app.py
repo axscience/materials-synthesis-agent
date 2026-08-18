@@ -94,8 +94,8 @@ def dashboard():
     )
 
     body = f"""
-    <p><b>Target:</b> {target.application} &mdash; optimizing <b>{target.metric_name}</b>
-    ({target.metric_measurement_method})</p>
+    <p><b>Target:</b> {target.application} &mdash; <b>{target.objective_direction.value}</b>
+    <b>{target.metric_name}</b> ({target.metric_measurement_method})</p>
     <p><b>Functional groups:</b> {", ".join(target.functional_groups)} &mdash;
     <b>Linkage chemistry:</b> {target.linkage_chemistry}</p>
 
@@ -198,7 +198,7 @@ def suggest_next():
         except ValueError:
             continue
 
-    optimizer = SingleObjectiveOptimizer(space, maximize=True)
+    optimizer = SingleObjectiveOptimizer(space, maximize=target.maximize)
     suggestion = optimizer.suggest_next(observations, literature_anchors=anchors)
 
     new_candidate = params_to_new_candidate(suggestion.params, target_id)

@@ -84,6 +84,69 @@ def test_single_objective_requires_at_least_two_observations():
         optimizer.suggest_next([Observation(params=TRUE_OPT, value=0.5, uncertainty=0.05)])
 
 
+# --- Regression: all-continuous parameter space (no categorical dimension) ---
+# MixedSingleTaskGP requires >=1 categorical dim; a researcher who fixes their solvent and
+# optimizes only temperature/time/concentration must not crash. See single_objective._build_model.
+
+CONTINUOUS_SPACE = ParameterSpace(
+    [
+        ParameterSpec("temperature_c", "continuous", bounds=(20, 150)),
+        ParameterSpec("time_hours", "continuous", bounds=(1, 96)),
+    ]
+)
+
+
+def _continuous_max_fn(p):  # optimum at (85, 60)
+    return -((p["temperature_c"] - 85) ** 2) / 4000 - ((p["time_hours"] - 60) ** 2) / 3000
+
+
+def test_all_continuous_space_does_not_crash_and_converges_maximize():
+    torch.manual_seed(3)
+    seeds = [
+        {"temperature_c": 40, "time_hours": 20},
+        {"temperature_c": 120, "time_hours": 80},
+        {"temperature_c": 70, "time_hours": 50},
+    ]
+    obs = [Observation(params=p, value=_continuous_max_fn(p), uncertainty=0.02) for p in seeds]
+    optimizer = SingleObjectiveOptimizer(CONTINUOUS_SPACE, maximize=True)
+    for _ in range(6):
+        s = optimizer.suggest_next(obs)
+        obs.append(Observation(params=s.params, value=_continuous_max_fn(s.params), uncertainty=0.02))
+    best = max(obs, key=lambda o: o.value)
+    assert best.value > -0.03  # close to the optimum value of 0
+
+
+# --- Regression: minimize direction ---
+# The optimizer must actually move toward LOWER values when maximize=False; many materials metrics
+# (particle size, defect density, reaction time, cost) are minimize goals.
+
+
+def _defect_fn(p):  # MINIMIZE: lowest (best) at temperature 30
+    return abs(p["temperature_c"] - 30) / 100.0
+
+
+def test_minimize_direction_moves_toward_lower_values():
+    torch.manual_seed(4)
+    space = ParameterSpace(
+        [ParameterSpec("temperature_c", "continuous", bounds=(20, 150)),
+         ParameterSpec("atmosphere", "categorical", categories=("N2", "Ar"))]
+    )
+    seeds = [
+        {"temperature_c": 60, "atmosphere": "N2"},
+        {"temperature_c": 100, "atmosphere": "Ar"},
+        {"temperature_c": 140, "atmosphere": "N2"},
+    ]
+    obs = [Observation(params=p, value=_defect_fn(p), uncertainty=0.01) for p in seeds]
+    optimizer = SingleObjectiveOptimizer(space, maximize=False)
+    for _ in range(6):
+        s = optimizer.suggest_next(obs)
+        obs.append(Observation(params=s.params, value=_defect_fn(s.params), uncertainty=0.01))
+    best = min(obs, key=lambda o: o.value)
+    # Best found should be near the true minimum (temp 30), NOT chasing the high-temperature end.
+    assert best.params["temperature_c"] < 55
+    assert best.value < 0.25
+
+
 def test_multi_objective_returns_nondominated_set_matching_predictions():
     torch.manual_seed(2)
     space = ParameterSpace(

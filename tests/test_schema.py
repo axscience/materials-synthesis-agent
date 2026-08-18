@@ -1,7 +1,44 @@
 import pytest
 from pydantic import ValidationError
 
-from materials_synthesis_agent.schema import Citation, FieldValue, Metric, MetricConfidence
+from materials_synthesis_agent.schema import (
+    Citation,
+    FieldValue,
+    Metric,
+    MetricConfidence,
+    ObjectiveDirection,
+    Target,
+)
+
+
+def _target(**overrides):
+    base = dict(
+        functional_groups=["imine"],
+        linkage_chemistry="imine condensation",
+        application="CO2 capture",
+        metric_name="crystallinity",
+        metric_measurement_method="PXRD",
+    )
+    base.update(overrides)
+    return Target(**base)
+
+
+def test_target_defaults_to_maximize():
+    t = _target()
+    assert t.objective_direction == ObjectiveDirection.MAXIMIZE
+    assert t.maximize is True
+
+
+def test_target_minimize_sets_maximize_false():
+    t = _target(objective_direction=ObjectiveDirection.MINIMIZE)
+    assert t.objective_direction == ObjectiveDirection.MINIMIZE
+    assert t.maximize is False
+
+
+def test_target_direction_round_trips_through_json():
+    t = _target(objective_direction=ObjectiveDirection.MINIMIZE)
+    restored = Target.model_validate_json(t.model_dump_json())
+    assert restored.maximize is False
 
 
 def test_field_value_requires_citation_or_inferred():

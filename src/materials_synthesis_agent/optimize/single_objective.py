@@ -22,9 +22,9 @@ from typing import Optional
 import torch
 from botorch.acquisition import LogExpectedImprovement
 from botorch.fit import fit_gpytorch_mll
-from botorch.models import MixedSingleTaskGP
+from botorch.models import MixedSingleTaskGP, SingleTaskGP
 from botorch.models.transforms.input import Normalize
-from botorch.optim import optimize_acqf_mixed
+from botorch.optim import optimize_acqf, optimize_acqf_mixed
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParamValue
@@ -68,7 +68,7 @@ class SingleObjectiveOptimizer:
         self.space = space
         self.maximize = maximize
 
-    def _build_model(self, observations: list[Observation]) -> tuple[MixedSingleTaskGP, torch.Tensor, torch.Tensor]:
+    def _build_model(self, observations: list[Observation]):
         train_x = self.space.encode_batch([o.params for o in observations])
         train_y = torch.tensor([[o.value] for o in observations], dtype=torch.double)
         train_yvar = torch.tensor(
@@ -76,19 +76,25 @@ class SingleObjectiveOptimizer:
              for o in observations],
             dtype=torch.double,
         )
-        model = MixedSingleTaskGP(
-            train_X=train_x,
-            train_Y=train_y,
-            train_Yvar=train_yvar,
-            cat_dims=self.space.categorical_feature_indices,
-            # Without this, the continuous dims are fit in their raw (e.g. 0-150) scale, but
-            # BoTorch's default lengthscale priors assume a unit cube -- the fitted lengthscale
-            # collapses to near-zero and the posterior mean reverts to the training mean just
-            # fractions of a percent away from any training point. Confirmed by direct testing
-            # (see optimize/ dev notes): without this transform a point 0.5/100 units from an
-            # exact training point loses ~90% of the signal.
-            input_transform=Normalize(d=self.space.dim, bounds=self.space.bounds),
-        )
+        # The Normalize input transform is required, not optional: without it the continuous dims
+        # are fit in their raw (e.g. 0-150) scale, but BoTorch's default lengthscale priors assume
+        # a unit cube -- the fitted lengthscale collapses to near-zero and the posterior mean
+        # reverts to the training mean just fractions of a percent away from any training point.
+        normalize = Normalize(d=self.space.dim, bounds=self.space.bounds)
+
+        cat_dims = self.space.categorical_feature_indices
+        if cat_dims:
+            model = MixedSingleTaskGP(
+                train_X=train_x, train_Y=train_y, train_Yvar=train_yvar,
+                cat_dims=cat_dims, input_transform=normalize,
+            )
+        else:
+            # MixedSingleTaskGP requires at least one categorical dimension. An all-continuous
+            # space (e.g. a researcher who fixed their solvent and optimizes only temperature/
+            # time/concentration) uses the plain SingleTaskGP instead.
+            model = SingleTaskGP(
+                train_X=train_x, train_Y=train_y, train_Yvar=train_yvar, input_transform=normalize,
+            )
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
         fit_gpytorch_mll(mll)
         return model, train_x, train_y
@@ -111,22 +117,25 @@ class SingleObjectiveOptimizer:
 
         acqf = LogExpectedImprovement(model=model, best_f=best_f, maximize=self.maximize)
 
-        batch_initial_conditions = None
         if literature_anchors:
-            anchor_x = self.space.encode_batch([a.params for a in literature_anchors])
-            # optimize_acqf_mixed ignores batch_initial_conditions when fixed_features_list drives
-            # the search (each fixed-feature combo gets its own restart set internally), so anchors
-            # bias the search by being included among the raw_samples candidates instead.
+            # Anchors bias the search by widening the raw-sample pool the optimizer starts from.
             raw_samples = max(raw_samples, raw_samples + len(literature_anchors) * 4)
 
-        candidate, acq_value = optimize_acqf_mixed(
-            acq_function=acqf,
-            bounds=self.space.bounds,
-            q=1,
-            num_restarts=num_restarts,
-            raw_samples=raw_samples,
-            fixed_features_list=self.space.fixed_features_list(),
-        )
+        fixed_features_list = self.space.fixed_features_list()
+        if fixed_features_list != [{}]:
+            # Mixed continuous+categorical space: search each categorical combination.
+            candidate, acq_value = optimize_acqf_mixed(
+                acq_function=acqf, bounds=self.space.bounds, q=1,
+                num_restarts=num_restarts, raw_samples=raw_samples,
+                fixed_features_list=fixed_features_list,
+            )
+        else:
+            # All-continuous space: plain continuous acquisition optimization (optimize_acqf_mixed
+            # requires a non-trivial fixed_features_list).
+            candidate, acq_value = optimize_acqf(
+                acq_function=acqf, bounds=self.space.bounds, q=1,
+                num_restarts=num_restarts, raw_samples=raw_samples,
+            )
 
         with torch.no_grad():
             posterior = model.posterior(candidate)

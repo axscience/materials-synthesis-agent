@@ -22,7 +22,7 @@ from materials_synthesis_agent.feasibility import check_protocol_candidate
 from materials_synthesis_agent.literature import build_query, estimate_generation_cost, generate_protocols, search
 from materials_synthesis_agent.llm import PROVIDERS
 from materials_synthesis_agent.optimize import LiteratureAnchor, Observation, ParameterSpace, SingleObjectiveOptimizer
-from materials_synthesis_agent.schema import Decision, Experiment, Metric, Target
+from materials_synthesis_agent.schema import Decision, Experiment, Metric, ObjectiveDirection, Target
 from materials_synthesis_agent.storage import Store
 
 app = typer.Typer(help="A literature-informed, Bayesian-optimization-driven agent for closed-loop materials synthesis.")
@@ -46,8 +46,18 @@ def init(
     application: str = typer.Option(..., prompt="Target application"),
     metric_name: str = typer.Option(..., prompt="Metric to optimize (e.g. 'crystallinity')"),
     metric_measurement_method: str = typer.Option(..., prompt="How will you measure it? (e.g. 'PXRD peak area ratio')"),
+    direction: str = typer.Option(
+        "maximize",
+        prompt="Do you want to 'maximize' or 'minimize' this metric?",
+        help="'maximize' (e.g. yield, crystallinity) or 'minimize' (e.g. particle size, defect density, cost).",
+    ),
 ):
     """Create a new local project and define its synthesis target."""
+    direction_normalized = direction.strip().lower()
+    if direction_normalized not in (ObjectiveDirection.MAXIMIZE.value, ObjectiveDirection.MINIMIZE.value):
+        console.print(f"[red]'{direction}' must be 'maximize' or 'minimize'.[/red]")
+        raise typer.Exit(1)
+
     proj.project_dir(name).mkdir(parents=True, exist_ok=True)
     store = Store(proj.db_path(name))
     target = Target(
@@ -56,6 +66,7 @@ def init(
         application=application,
         metric_name=metric_name,
         metric_measurement_method=metric_measurement_method,
+        objective_direction=ObjectiveDirection(direction_normalized),
     )
     store.save_target(target)
     proj.target_path(name).write_text(target.id)
@@ -221,7 +232,7 @@ def suggest_next(name: str):
         except ValueError:
             continue
 
-    optimizer = SingleObjectiveOptimizer(space, maximize=True)
+    optimizer = SingleObjectiveOptimizer(space, maximize=target.maximize)
     suggestion = optimizer.suggest_next(observations, literature_anchors=anchors)
 
     new_candidate = params_to_new_candidate(suggestion.params, target.id)
