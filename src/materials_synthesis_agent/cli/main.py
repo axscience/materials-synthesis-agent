@@ -22,7 +22,7 @@ from materials_synthesis_agent.feasibility import check_protocol_candidate
 from materials_synthesis_agent.literature import build_query, estimate_generation_cost, generate_protocols, search
 from materials_synthesis_agent.llm import PROVIDERS
 from materials_synthesis_agent.optimize import LiteratureAnchor, Observation, ParameterSpace, SingleObjectiveOptimizer
-from materials_synthesis_agent.schema import Decision, Experiment, Metric, ObjectiveDirection, Target
+from materials_synthesis_agent.schema import Decision, Experiment, Metric, ObjectiveDirection, Target, TargetObjective
 from materials_synthesis_agent.storage import Store
 
 app = typer.Typer(help="A literature-informed, Bayesian-optimization-driven agent for closed-loop materials synthesis.")
@@ -53,10 +53,27 @@ def init(
     ),
 ):
     """Create a new local project and define its synthesis target."""
-    direction_normalized = direction.strip().lower()
-    if direction_normalized not in (ObjectiveDirection.MAXIMIZE.value, ObjectiveDirection.MINIMIZE.value):
-        console.print(f"[red]'{direction}' must be 'maximize' or 'minimize'.[/red]")
-        raise typer.Exit(1)
+
+    def _parse_direction(raw: str) -> ObjectiveDirection:
+        norm = raw.strip().lower()
+        if norm not in (ObjectiveDirection.MAXIMIZE.value, ObjectiveDirection.MINIMIZE.value):
+            console.print(f"[red]'{raw}' must be 'maximize' or 'minimize'.[/red]")
+            raise typer.Exit(1)
+        return ObjectiveDirection(norm)
+
+    first_direction = _parse_direction(direction)
+
+    # The first metric (prompted above) is objective #1. Optionally collect more, for a
+    # multi-objective (Pareto) project -- e.g. maximize yield AND minimize cost simultaneously.
+    objectives = [TargetObjective(name=metric_name, measurement_method=metric_measurement_method, direction=first_direction)]
+    console.print("[dim]Optimize more than one metric at once? Add more objectives, or leave the name blank to finish.[/dim]")
+    while True:
+        extra_name = typer.prompt("Additional metric to optimize (blank to finish)", default="", show_default=False)
+        if not extra_name.strip():
+            break
+        extra_method = typer.prompt(f"How will you measure '{extra_name.strip()}'?")
+        extra_direction = _parse_direction(typer.prompt(f"'maximize' or 'minimize' '{extra_name.strip()}'?", default="maximize"))
+        objectives.append(TargetObjective(name=extra_name.strip(), measurement_method=extra_method, direction=extra_direction))
 
     proj.project_dir(name).mkdir(parents=True, exist_ok=True)
     store = Store(proj.db_path(name))
@@ -66,7 +83,10 @@ def init(
         application=application,
         metric_name=metric_name,
         metric_measurement_method=metric_measurement_method,
-        objective_direction=ObjectiveDirection(direction_normalized),
+        objective_direction=first_direction,
+        # Only store the list when there's genuinely more than one; a single objective stays on the
+        # legacy fields so single-objective projects are byte-for-byte unchanged.
+        objectives=objectives if len(objectives) > 1 else [],
     )
     store.save_target(target)
     proj.target_path(name).write_text(target.id)
@@ -74,6 +94,8 @@ def init(
     store.close()
 
     console.print(f"[green]Project '{name}' created.[/green]")
+    if len(objectives) > 1:
+        console.print("Optimizing " + ", ".join(f"{o.name} ({o.direction.value})" for o in objectives) + " together (Pareto).")
     console.print(f"Edit [bold]{space_path}[/bold] to match this target's real synthesis parameters, then run:")
     console.print(f"  materials-agent suggest-protocols {name}")
 
@@ -168,11 +190,21 @@ def suggest_protocols(
 def log_result(
     name: str,
     protocol_candidate_id: str,
-    value: float = typer.Option(..., help="The measured metric value."),
-    uncertainty: float = typer.Option(None, help="Measurement uncertainty. Omitting this flags the result low-confidence."),
+    value: float = typer.Option(None, help="Single-objective: the measured metric value."),
+    uncertainty: float = typer.Option(None, help="Single-objective: measurement uncertainty. Omitting it flags the result low-confidence."),
+    metric: list[str] = typer.Option(
+        [], "--metric", help="Multi-objective: name=value (repeat once per objective, e.g. --metric yield=0.7 --metric cost=12)."
+    ),
+    metric_uncertainty: list[str] = typer.Option(
+        [], "--metric-uncertainty", help="Multi-objective: name=uncertainty (repeat; optional per objective)."
+    ),
     deviation: list[str] = typer.Option([], help="key=value pairs describing how you deviated from the protocol."),
 ):
-    """Log a lab result against a protocol candidate."""
+    """Log a lab result against a protocol candidate.
+
+    Single-objective projects: pass --value (and optionally --uncertainty).
+    Multi-objective projects: pass one --metric name=value per objective (and optional
+    --metric-uncertainty name=value)."""
     store = Store(proj.db_path(name))
     target = _load_target(name, store)
 
@@ -183,19 +215,60 @@ def log_result(
         raise typer.Exit(1)
     candidate = matches[0]
 
+    def _parse_pairs(items: list[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for item in items:
+            if "=" not in item:
+                console.print(f"[red]'{item}' must be name=value.[/red]")
+                raise typer.Exit(1)
+            key, val = item.split("=", 1)
+            out[key.strip()] = float(val)
+        return out
+
+    objective_names = {o.name for o in target.all_objectives}
+    metrics: list[Metric] = []
+
+    if metric:
+        # Multi-objective path.
+        values = _parse_pairs(metric)
+        uncertainties = _parse_pairs(metric_uncertainty)
+        missing = objective_names - set(values)
+        if missing:
+            console.print(f"[red]Missing --metric value(s) for: {', '.join(sorted(missing))}.[/red]")
+            raise typer.Exit(1)
+        for obj in target.all_objectives:
+            metrics.append(Metric(
+                name=obj.name, value=values[obj.name], uncertainty=uncertainties.get(obj.name),
+                measurement_method=obj.measurement_method,
+            ))
+    else:
+        # Single-objective path.
+        if target.is_multi_objective:
+            console.print(f"[red]This project has multiple objectives ({', '.join(sorted(objective_names))}). Use --metric name=value for each.[/red]")
+            raise typer.Exit(1)
+        if value is None:
+            console.print("[red]--value is required for a single-objective project.[/red]")
+            raise typer.Exit(1)
+        obj = target.all_objectives[0]
+        metrics.append(Metric(name=obj.name, value=value, uncertainty=uncertainty, measurement_method=obj.measurement_method))
+
     deviations = dict(d.split("=", 1) for d in deviation)
-    metric = Metric(name=target.metric_name, value=value, uncertainty=uncertainty, measurement_method=target.metric_measurement_method)
-    experiment = Experiment(project_target_id=target.id, protocol_candidate_id=candidate.id, deviations=deviations, metrics=[metric])
+    experiment = Experiment(project_target_id=target.id, protocol_candidate_id=candidate.id, deviations=deviations, metrics=metrics)
     store.save_experiment(experiment)
     store.close()
 
-    confidence_note = "" if uncertainty is not None else " [yellow](low-confidence: no uncertainty given)[/yellow]"
-    console.print(f"[green]Logged.[/green] {target.metric_name}={value}{confidence_note}")
+    summary = ", ".join(
+        f"{m.name}={m.value}" + ("" if m.uncertainty is not None else " (low-confidence)") for m in metrics
+    )
+    console.print(f"[green]Logged.[/green] {summary}")
 
 
 @app.command()
 def suggest_next(name: str):
-    """Get the next recommended experiment from the Bayesian optimizer."""
+    """Get the next recommended experiment(s) from the Bayesian optimizer.
+
+    Single-objective projects get one recommendation. Multi-objective projects get a Pareto set --
+    several experiments that trade the objectives off against each other, for you to choose from."""
     space = ParameterSpace(proj.load_parameter_space(name))
     store = Store(proj.db_path(name))
     target = _load_target(name, store)
@@ -204,10 +277,18 @@ def suggest_next(name: str):
     experiments = store.list_experiments(target.id)
     candidates_by_id = {c.id: c for c in candidates}
 
+    if target.is_multi_objective:
+        _suggest_next_multi(name, space, store, target, candidates, experiments, candidates_by_id)
+    else:
+        _suggest_next_single(name, space, store, target, candidates, experiments, candidates_by_id)
+
+
+def _suggest_next_single(name, space, store, target, candidates, experiments, candidates_by_id):
+    objective = target.all_objectives[0]
     observations = []
     for exp in experiments:
         candidate = candidates_by_id.get(exp.protocol_candidate_id)
-        matching_metric = next((m for m in exp.metrics if m.name == target.metric_name), None)
+        matching_metric = next((m for m in exp.metrics if m.name == objective.name), None)
         if candidate is None or matching_metric is None:
             continue
         try:
@@ -240,32 +321,100 @@ def suggest_next(name: str):
 
     from materials_synthesis_agent.schema import BOSuggestion
 
-    bo_suggestion = BOSuggestion(
-        target_id=target.id,
-        protocol_candidate_id=new_candidate.id,
-        expected_improvement=suggestion.expected_improvement,
-        uncertainty=suggestion.predicted_uncertainty,
+    store.save_bo_suggestion(BOSuggestion(
+        target_id=target.id, protocol_candidate_id=new_candidate.id,
+        expected_improvement=suggestion.expected_improvement, uncertainty=suggestion.predicted_uncertainty,
         rationale=suggestion.rationale,
-    )
-    store.save_bo_suggestion(bo_suggestion)
-
+    ))
     previous_decision = store.latest_decision()
-    decision = Decision(
+    store.save_decision(Decision(
         context=f"Suggest next experiment for target '{target.application}' after {len(observations)} results.",
-        options_considered=[c.id for c in candidates],
-        chosen_protocol_candidate_id=new_candidate.id,
+        options_considered=[c.id for c in candidates], chosen_protocol_candidate_id=new_candidate.id,
         rationale=suggestion.rationale,
-        expected_outcome=f"{target.metric_name} ~= {suggestion.predicted_value:.4g} (+/- {suggestion.predicted_uncertainty:.4g})",
+        expected_outcome=f"{objective.name} ~= {suggestion.predicted_value:.4g} (+/- {suggestion.predicted_uncertainty:.4g})",
         followed_from=previous_decision.id if previous_decision else None,
-    )
-    store.save_decision(decision)
+    ))
     store.close()
 
     console.print(f"[bold green]Next suggested experiment (candidate {new_candidate.id[:8]}):[/bold green]")
     for k, v in suggestion.params.items():
         console.print(f"  {k}: {v}")
-    console.print(f"Expected {target.metric_name}: {suggestion.predicted_value:.4g} (+/- {suggestion.predicted_uncertainty:.4g})")
+    console.print(f"Expected {objective.name}: {suggestion.predicted_value:.4g} (+/- {suggestion.predicted_uncertainty:.4g})")
     console.print(f"[dim]{suggestion.rationale}[/dim]")
+
+
+def _suggest_next_multi(name, space, store, target, candidates, experiments, candidates_by_id):
+    from materials_synthesis_agent.optimize import MultiObjectiveOptimizer, MultiObservation, Objective
+    from materials_synthesis_agent.schema import BOSuggestion
+
+    objectives = target.all_objectives
+    objective_names = [o.name for o in objectives]
+
+    observations = []
+    for exp in experiments:
+        candidate = candidates_by_id.get(exp.protocol_candidate_id)
+        if candidate is None:
+            continue
+        by_name = {m.name: m for m in exp.metrics}
+        if not all(n in by_name for n in objective_names):
+            continue  # need every objective measured for this experiment to use it
+        try:
+            params = protocol_to_params(candidate, space)
+        except ValueError as exc:
+            console.print(f"[yellow]Skipping experiment {exp.id[:8]}: {exc}[/yellow]")
+            continue
+        observations.append(MultiObservation(
+            params=params,
+            values={n: by_name[n].value for n in objective_names},
+            uncertainties={n: by_name[n].uncertainty for n in objective_names},
+        ))
+
+    if len(observations) < 3:
+        console.print(
+            f"[yellow]Only {len(observations)} usable result(s) with all {len(objectives)} objectives measured -- "
+            "need at least 3 for a multi-objective recommendation.[/yellow] Log more results (each with every "
+            "metric) first."
+        )
+        raise typer.Exit(0)
+
+    optimizer = MultiObjectiveOptimizer(space, [Objective(name=o.name, maximize=o.maximize) for o in objectives])
+    pareto = optimizer.suggest_next(observations, n_suggestions=4)
+
+    import uuid
+    pareto_set_id = str(uuid.uuid4())
+    previous_decision = store.latest_decision()
+    rows = []
+    for s in pareto:
+        new_candidate = params_to_new_candidate(s.params, target.id)
+        store.save_protocol_candidate(new_candidate)
+        store.save_bo_suggestion(BOSuggestion(
+            target_id=target.id, protocol_candidate_id=new_candidate.id, rationale=s.rationale,
+            pareto_set_id=pareto_set_id, predicted_values=s.predicted_values,
+        ))
+        rows.append((new_candidate, s))
+
+    store.save_decision(Decision(
+        context=f"Suggest Pareto set for target '{target.application}' ({', '.join(objective_names)}) after {len(observations)} results.",
+        options_considered=[c.id for c in candidates],
+        chosen_protocol_candidate_id=rows[0][0].id if rows else "",
+        rationale=f"{len(rows)} Pareto-optimal candidates; researcher chooses the tradeoff.",
+        expected_outcome="; ".join(objective_names),
+        followed_from=previous_decision.id if previous_decision else None,
+    ))
+    store.close()
+
+    console.print(f"[bold green]{len(rows)} Pareto-optimal next experiments[/bold green] -- pick the tradeoff you want, run it, and log-result:")
+    table = Table(title="Pareto set (predicted objective values)")
+    table.add_column("candidate")
+    for spec in space.specs:
+        table.add_column(spec.name)
+    for o in objectives:
+        table.add_column(f"{o.name} ({o.direction.value})")
+    for candidate, s in rows:
+        param_cells = [str(round(s.params[spec.name], 2) if isinstance(s.params[spec.name], float) else s.params[spec.name]) for spec in space.specs]
+        pred_cells = [f"{s.predicted_values[o.name]:.4g}" for o in objectives]
+        table.add_row(candidate.id[:8], *param_cells, *pred_cells)
+    console.print(table)
 
 
 @app.command()

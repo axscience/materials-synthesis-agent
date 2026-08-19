@@ -77,6 +77,19 @@ class FieldValue(BaseModel):
         return self
 
 
+class TargetObjective(BaseModel):
+    """One metric to optimize, with how it's measured and which way to push it. A Target with two
+    or more of these is a multi-objective (Pareto) problem."""
+
+    name: str
+    measurement_method: str
+    direction: ObjectiveDirection = ObjectiveDirection.MAXIMIZE
+
+    @property
+    def maximize(self) -> bool:
+        return self.direction == ObjectiveDirection.MAXIMIZE
+
+
 class Target(BaseModel):
     id: str = Field(default_factory=_new_id)
     functional_groups: list[str]
@@ -85,11 +98,34 @@ class Target(BaseModel):
     metric_name: str
     metric_measurement_method: str
     objective_direction: ObjectiveDirection = ObjectiveDirection.MAXIMIZE
+    # Empty for single-objective projects (the metric_name/objective_direction fields above are the
+    # source of truth then). Populated with 2+ entries for a multi-objective/Pareto project. Read
+    # via `all_objectives`, never directly, so both cases are handled uniformly.
+    objectives: list[TargetObjective] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now)
 
     @property
     def maximize(self) -> bool:
         return self.objective_direction == ObjectiveDirection.MAXIMIZE
+
+    @property
+    def all_objectives(self) -> list[TargetObjective]:
+        """The objectives to optimize, uniformly. Falls back to the single legacy metric fields
+        when `objectives` is empty, so single-objective projects (including ones saved before
+        multi-objective existed) keep working unchanged."""
+        if self.objectives:
+            return self.objectives
+        return [
+            TargetObjective(
+                name=self.metric_name,
+                measurement_method=self.metric_measurement_method,
+                direction=self.objective_direction,
+            )
+        ]
+
+    @property
+    def is_multi_objective(self) -> bool:
+        return len(self.all_objectives) > 1
 
 
 class ProtocolCandidate(BaseModel):
@@ -172,11 +208,14 @@ class BOSuggestion(BaseModel):
     id: str = Field(default_factory=_new_id)
     target_id: str
     protocol_candidate_id: str  # the suggested next protocol
-    expected_improvement: float
-    uncertainty: float
+    expected_improvement: float = 0.0  # single-objective only; 0 for a Pareto-set member
+    uncertainty: float = 0.0
     rationale: str
     pareto_set_id: Optional[str] = Field(
-        default=None, description="Groups suggestions that form one Pareto front (v0.2, multi-objective)."
+        default=None, description="Groups suggestions that form one Pareto front (multi-objective)."
+    )
+    predicted_values: Optional[dict[str, float]] = Field(
+        default=None, description="objective name -> predicted value (multi-objective Pareto members)."
     )
     generated_at: datetime = Field(default_factory=_now)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from materials_synthesis_agent.cli import project as proj
@@ -59,6 +59,22 @@ def dashboard():
     trajectory = store.reconstruct_trajectory()
     store.close()
 
+    objectives = target.all_objectives
+
+    def _log_form(candidate_id: str) -> str:
+        # One value+uncertainty input pair per objective, named by index (m0/u0, m1/u1, ...) so
+        # objective names with spaces don't break form field names. Order matches all_objectives.
+        inputs = "".join(
+            f"<input name='m{i}' placeholder='{o.name}' size='6' required>"
+            f"<input name='u{i}' placeholder='&plusmn; (opt)' size='5'>"
+            for i, o in enumerate(objectives)
+        )
+        return (
+            f"<form class='inline' method='post' action='/log-result'>"
+            f"<input type='hidden' name='protocol_candidate_id' value='{candidate_id}'>"
+            f"{inputs}<button type='submit'>log result</button></form>"
+        )
+
     candidate_rows = "".join(
         f"<tr><td>{c.id[:8]}</td><td>{c.source.value}</td>"
         f"<td>{c.solvent.value if c.solvent else '-'}</td>"
@@ -66,11 +82,7 @@ def dashboard():
         f"<td>{c.time_hours.value if c.time_hours else '-'}</td>"
         f"<td>{c.citation_coverage():.0%}</td>"
         f"<td class='flag'>{'; '.join(c.feasibility_flags) or ''}</td>"
-        f"<td><form class='inline' method='post' action='/log-result'>"
-        f"<input type='hidden' name='protocol_candidate_id' value='{c.id}'>"
-        f"<input name='value' placeholder='{target.metric_name} value' size='6' required>"
-        f"<input name='uncertainty' placeholder='+/- (optional)' size='6'>"
-        f"<button type='submit'>log result</button></form></td></tr>"
+        f"<td>{_log_form(c.id)}</td></tr>"
         for c in candidates
     )
     experiment_rows = "".join(
@@ -83,33 +95,50 @@ def dashboard():
         + "</tr>"
         for e in experiments
     )
-    suggestion_rows = "".join(
-        f"<tr><td>{s.protocol_candidate_id[:8]}</td><td>{s.expected_improvement:.4g}</td>"
-        f"<td>{s.uncertainty:.4g}</td><td>{s.rationale}</td></tr>"
-        for s in suggestions
-    )
+    if target.is_multi_objective:
+        # Multi-objective: show predicted objective values per suggestion.
+        suggestion_rows = "".join(
+            f"<tr><td>{s.protocol_candidate_id[:8]}</td>"
+            + "".join(f"<td>{s.predicted_values.get(o.name, float('nan')):.4g}</td>" for o in objectives)
+            + f"<td>{'Pareto set ' + s.pareto_set_id[:8] if s.pareto_set_id else ''}</td></tr>"
+            for s in suggestions
+        )
+        suggestion_header = (
+            "<tr><th>candidate</th>" + "".join(f"<th>{o.name} ({o.direction.value})</th>" for o in objectives) + "<th>group</th></tr>"
+        )
+    else:
+        suggestion_rows = "".join(
+            f"<tr><td>{s.protocol_candidate_id[:8]}</td><td>{s.expected_improvement:.4g}</td>"
+            f"<td>{s.uncertainty:.4g}</td><td>{s.rationale}</td></tr>"
+            for s in suggestions
+        )
+        suggestion_header = "<tr><th>candidate</th><th>expected improvement</th><th>uncertainty</th><th>rationale</th></tr>"
+
     decision_rows = "".join(
         f"<tr><td>{d.context}</td><td>{d.expected_outcome}</td><td>{d.actual_outcome or '(pending)'}</td></tr>"
         for d in trajectory
     )
 
+    objectives_line = ", ".join(f"<b>{o.direction.value} {o.name}</b> ({o.measurement_method})" for o in objectives)
+    suggest_button_label = "Get Pareto set" if target.is_multi_objective else "Get BO suggestion"
+    log_headers = "".join(f"<th>{o.name}</th>" for o in objectives)
+
     body = f"""
-    <p><b>Target:</b> {target.application} &mdash; <b>{target.objective_direction.value}</b>
-    <b>{target.metric_name}</b> ({target.metric_measurement_method})</p>
+    <p><b>Target:</b> {target.application} &mdash; optimizing {objectives_line}</p>
     <p><b>Functional groups:</b> {", ".join(target.functional_groups)} &mdash;
     <b>Linkage chemistry:</b> {target.linkage_chemistry}</p>
 
     <h2>Protocol candidates ({len(candidates)})</h2>
     <form method="get" action="/suggest-protocols"><button type="submit">Search literature for more candidates</button></form>
     <table><tr><th>id</th><th>source</th><th>solvent</th><th>temp</th><th>time</th>
-    <th>citations</th><th>feasibility flags</th><th>log a result</th></tr>{candidate_rows}</table>
+    <th>citations</th><th>feasibility flags</th><th>log result ({log_headers and 'per metric'})</th></tr>{candidate_rows}</table>
 
     <h2>Logged experiments ({len(experiments)})</h2>
     <table><tr><th>candidate</th><th>metrics</th></tr>{experiment_rows}</table>
 
-    <h2>Next experiment</h2>
-    <form method="post" action="/suggest-next"><button type="submit">Get BO suggestion</button></form>
-    <table><tr><th>candidate</th><th>expected improvement</th><th>uncertainty</th><th>rationale</th></tr>{suggestion_rows}</table>
+    <h2>Next experiment{'s (Pareto set)' if target.is_multi_objective else ''}</h2>
+    <form method="post" action="/suggest-next"><button type="submit">{suggest_button_label}</button></form>
+    <table>{suggestion_header}{suggestion_rows}</table>
 
     <h2>Decision trajectory</h2>
     <table><tr><th>context</th><th>expected</th><th>actual</th></tr>{decision_rows}</table>
@@ -149,15 +178,27 @@ def suggest_protocols_run():
 
 
 @app.post("/log-result")
-def log_result(protocol_candidate_id: str = Form(...), value: float = Form(...), uncertainty: str = Form("")):
+async def log_result(request: Request):
+    # The form has a dynamic number of metric inputs (m0/u0, m1/u1, ... one per objective), so
+    # read the raw form rather than declaring static Form(...) params.
+    form = await request.form()
+    protocol_candidate_id = form["protocol_candidate_id"]
+
     name = _project_name()
     store = Store(proj.db_path(name))
     target_id = proj.target_path(name).read_text().strip()
     target = store.get_target(target_id)
 
-    unc = float(uncertainty) if uncertainty.strip() else None
-    metric = Metric(name=target.metric_name, value=value, uncertainty=unc, measurement_method=target.metric_measurement_method)
-    experiment = Experiment(project_target_id=target_id, protocol_candidate_id=protocol_candidate_id, metrics=[metric])
+    metrics = []
+    for i, obj in enumerate(target.all_objectives):
+        raw_value = form.get(f"m{i}", "")
+        if not str(raw_value).strip():
+            continue
+        raw_unc = form.get(f"u{i}", "")
+        unc = float(raw_unc) if str(raw_unc).strip() else None
+        metrics.append(Metric(name=obj.name, value=float(raw_value), uncertainty=unc, measurement_method=obj.measurement_method))
+
+    experiment = Experiment(project_target_id=target_id, protocol_candidate_id=protocol_candidate_id, metrics=metrics)
     store.save_experiment(experiment)
     store.close()
     return RedirectResponse("/", status_code=303)
@@ -175,10 +216,19 @@ def suggest_next():
     experiments = store.list_experiments(target_id)
     candidates_by_id = {c.id: c for c in candidates}
 
+    if target.is_multi_objective:
+        result = _web_suggest_multi(space, store, target, target_id, candidates, experiments, candidates_by_id)
+    else:
+        result = _web_suggest_single(space, store, target, target_id, candidates, experiments, candidates_by_id)
+    return result
+
+
+def _web_suggest_single(space, store, target, target_id, candidates, experiments, candidates_by_id):
+    objective = target.all_objectives[0]
     observations = []
     for exp in experiments:
         candidate = candidates_by_id.get(exp.protocol_candidate_id)
-        metric = next((m for m in exp.metrics if m.name == target.metric_name), None)
+        metric = next((m for m in exp.metrics if m.name == objective.name), None)
         if candidate is None or metric is None:
             continue
         try:
@@ -203,25 +253,67 @@ def suggest_next():
 
     new_candidate = params_to_new_candidate(suggestion.params, target_id)
     store.save_protocol_candidate(new_candidate)
-    store.save_bo_suggestion(
-        BOSuggestion(
-            target_id=target_id,
-            protocol_candidate_id=new_candidate.id,
-            expected_improvement=suggestion.expected_improvement,
-            uncertainty=suggestion.predicted_uncertainty,
-            rationale=suggestion.rationale,
-        )
-    )
+    store.save_bo_suggestion(BOSuggestion(
+        target_id=target_id, protocol_candidate_id=new_candidate.id,
+        expected_improvement=suggestion.expected_improvement, uncertainty=suggestion.predicted_uncertainty,
+        rationale=suggestion.rationale,
+    ))
     previous = store.latest_decision()
-    store.save_decision(
-        Decision(
-            context=f"Suggest next experiment for target '{target.application}' after {len(observations)} results.",
-            options_considered=[c.id for c in candidates],
-            chosen_protocol_candidate_id=new_candidate.id,
-            rationale=suggestion.rationale,
-            expected_outcome=f"{target.metric_name} ~= {suggestion.predicted_value:.4g} (+/- {suggestion.predicted_uncertainty:.4g})",
-            followed_from=previous.id if previous else None,
-        )
-    )
+    store.save_decision(Decision(
+        context=f"Suggest next experiment for target '{target.application}' after {len(observations)} results.",
+        options_considered=[c.id for c in candidates], chosen_protocol_candidate_id=new_candidate.id,
+        rationale=suggestion.rationale,
+        expected_outcome=f"{objective.name} ~= {suggestion.predicted_value:.4g} (+/- {suggestion.predicted_uncertainty:.4g})",
+        followed_from=previous.id if previous else None,
+    ))
+    store.close()
+    return RedirectResponse("/", status_code=303)
+
+
+def _web_suggest_multi(space, store, target, target_id, candidates, experiments, candidates_by_id):
+    from materials_synthesis_agent.optimize import MultiObjectiveOptimizer, MultiObservation, Objective
+    import uuid
+
+    objectives = target.all_objectives
+    names = [o.name for o in objectives]
+    observations = []
+    for exp in experiments:
+        candidate = candidates_by_id.get(exp.protocol_candidate_id)
+        if candidate is None:
+            continue
+        by_name = {m.name: m for m in exp.metrics}
+        if not all(n in by_name for n in names):
+            continue
+        try:
+            params = protocol_to_params(candidate, space)
+        except ValueError:
+            continue
+        observations.append(MultiObservation(
+            params=params, values={n: by_name[n].value for n in names},
+            uncertainties={n: by_name[n].uncertainty for n in names},
+        ))
+
+    if len(observations) < 3:
+        store.close()
+        return _page("Not enough data", f"<p>Need at least 3 results with all {len(objectives)} objectives measured.</p>")
+
+    optimizer = MultiObjectiveOptimizer(space, [Objective(name=o.name, maximize=o.maximize) for o in objectives])
+    pareto = optimizer.suggest_next(observations, n_suggestions=4)
+
+    pareto_set_id = str(uuid.uuid4())
+    for s in pareto:
+        new_candidate = params_to_new_candidate(s.params, target_id)
+        store.save_protocol_candidate(new_candidate)
+        store.save_bo_suggestion(BOSuggestion(
+            target_id=target_id, protocol_candidate_id=new_candidate.id, rationale=s.rationale,
+            pareto_set_id=pareto_set_id, predicted_values=s.predicted_values,
+        ))
+    previous = store.latest_decision()
+    store.save_decision(Decision(
+        context=f"Suggest Pareto set for target '{target.application}' ({', '.join(names)}) after {len(observations)} results.",
+        options_considered=[c.id for c in candidates], chosen_protocol_candidate_id="",
+        rationale=f"{len(pareto)} Pareto-optimal candidates; researcher chooses the tradeoff.",
+        expected_outcome="; ".join(names), followed_from=previous.id if previous else None,
+    ))
     store.close()
     return RedirectResponse("/", status_code=303)

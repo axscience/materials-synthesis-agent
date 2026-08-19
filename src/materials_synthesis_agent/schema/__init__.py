@@ -10,6 +10,7 @@ from materials_synthesis_agent.schema.models import (
     ProtocolCandidate,
     ProtocolSource,
     Target,
+    TargetObjective,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "ProtocolCandidate",
     "ProtocolSource",
     "Target",
+    "TargetObjective",
 ]
