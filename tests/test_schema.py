@@ -23,6 +23,17 @@ def _target(**overrides):
     return Target(**base)
 
 
+def test_target_name_defaults_to_none():
+    t = _target()
+    assert t.name is None
+
+
+def test_target_name_round_trips_through_json():
+    t = _target(name="COF-5")
+    restored = Target.model_validate_json(t.model_dump_json())
+    assert restored.name == "COF-5"
+
+
 def test_target_defaults_to_maximize():
     t = _target()
     assert t.objective_direction == ObjectiveDirection.MAXIMIZE
@@ -85,3 +96,15 @@ def test_protocol_candidate_citation_coverage_empty_is_zero():
 
     candidate = ProtocolCandidate(target_id="t1", source=ProtocolSource.MANUAL)
     assert candidate.citation_coverage() == 0.0
+
+
+def test_parsed_request_defaults_are_empty_not_guessed():
+    from materials_synthesis_agent.schema import ParsedRequest
+
+    parsed = ParsedRequest(raw_text="make me a COF")
+    assert parsed.cof_name is None
+    assert parsed.cif_path is None
+    assert parsed.functional_groups == []
+    assert parsed.objectives == []
+    assert parsed.inferred_fields == []
+    assert parsed.clarifications_needed == []

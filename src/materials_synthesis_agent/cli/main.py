@@ -1,6 +1,6 @@
-"""CLI entrypoints: init, suggest-protocols, log-result, suggest-next.
+"""CLI entrypoints: ask, init, suggest-protocols, log-result, suggest-next.
 
-Every command that spends money (suggest-protocols) shows a cost estimate and asks for
+Every command that spends money (ask, suggest-protocols) shows a cost estimate and asks for
 confirmation before running, unless --yes is passed -- CLAUDE.md guardrail on cost governance,
 enforced locally the same way materials-copilot enforces it for hosted users.
 """
@@ -8,6 +8,7 @@ enforced locally the same way materials-copilot enforces it for hosted users.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from materials_synthesis_agent.cli.params import params_to_new_candidate, protoc
 from materials_synthesis_agent.feasibility import check_protocol_candidate
 from materials_synthesis_agent.literature import build_query, estimate_generation_cost, generate_protocols, search
 from materials_synthesis_agent.llm import PROVIDERS
+from materials_synthesis_agent.nl import estimate_parse_cost, parse_request
 from materials_synthesis_agent.optimize import LiteratureAnchor, Observation, ParameterSpace, SingleObjectiveOptimizer
 from materials_synthesis_agent.schema import Decision, Experiment, Metric, ObjectiveDirection, Target, TargetObjective
 from materials_synthesis_agent.storage import Store
@@ -36,6 +38,23 @@ def _load_target(name: str, store: Store) -> Target:
         console.print(f"[red]No target found for project '{name}' (id {target_id}).[/red]")
         raise typer.Exit(1)
     return target
+
+
+def _create_project(name: str, target: Target) -> Path:
+    """Shared by `init` and `ask`: write a Target to a new project directory and the example
+    parameter space. Returns the parameter-space path so the caller can tell the user to edit it."""
+    proj.project_dir(name).mkdir(parents=True, exist_ok=True)
+    store = Store(proj.db_path(name))
+    store.save_target(target)
+    proj.target_path(name).write_text(target.id)
+    space_path = proj.write_example_parameter_space(name)
+    store.close()
+    return space_path
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    return slug or "cof-project"
 
 
 @app.command()
@@ -75,8 +94,6 @@ def init(
         extra_direction = _parse_direction(typer.prompt(f"'maximize' or 'minimize' '{extra_name.strip()}'?", default="maximize"))
         objectives.append(TargetObjective(name=extra_name.strip(), measurement_method=extra_method, direction=extra_direction))
 
-    proj.project_dir(name).mkdir(parents=True, exist_ok=True)
-    store = Store(proj.db_path(name))
     target = Target(
         functional_groups=[g.strip() for g in functional_groups.split(",") if g.strip()],
         linkage_chemistry=linkage_chemistry,
@@ -88,16 +105,100 @@ def init(
         # legacy fields so single-objective projects are byte-for-byte unchanged.
         objectives=objectives if len(objectives) > 1 else [],
     )
-    store.save_target(target)
-    proj.target_path(name).write_text(target.id)
-    space_path = proj.write_example_parameter_space(name)
-    store.close()
+    space_path = _create_project(name, target)
 
     console.print(f"[green]Project '{name}' created.[/green]")
     if len(objectives) > 1:
         console.print("Optimizing " + ", ".join(f"{o.name} ({o.direction.value})" for o in objectives) + " together (Pareto).")
     console.print(f"Edit [bold]{space_path}[/bold] to match this target's real synthesis parameters, then run:")
     console.print(f"  materials-agent suggest-protocols {name}")
+
+
+@app.command()
+def ask(
+    text: str = typer.Argument(
+        ..., help="Describe what you want in your own words -- e.g. \"Here's a CIF of a COF, tell me how to synthesize it to maximize crystallinity via PXRD peak ratio.\""
+    ),
+    name: str = typer.Option(None, help="Project name -- becomes a local directory. Defaults to a slug derived from what's understood."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the cost-estimate confirmation prompt."),
+):
+    """Parse a free-text request with an LLM and create a project from it -- an alternative to
+    `init`'s typed prompts. Never invents a metric, application, or direction you didn't state --
+    if something essential is missing, this asks instead of guessing."""
+    if get_configured_provider() is None:
+        console.print(
+            "[red]No LLM provider configured.[/red] Run [bold]materials-agent configure[/bold] first, "
+            "or set one of: " + ", ".join(c.env_var for c in PROVIDERS.values())
+        )
+        raise typer.Exit(1)
+
+    estimated_cost = estimate_parse_cost(text)
+    console.print(f"Estimated parsing cost: [bold]${estimated_cost:.4f}[/bold]")
+    if not yes and not typer.confirm("Proceed?"):
+        raise typer.Exit(0)
+
+    parsed = parse_request(text)
+
+    console.print("[bold]Understood:[/bold]")
+    if parsed.cof_name:
+        console.print(f"  COF name: {parsed.cof_name}")
+    if parsed.cif_path:
+        console.print(f"  CIF file: {parsed.cif_path}")
+    if parsed.functional_groups:
+        console.print(f"  Functional groups: {', '.join(parsed.functional_groups)}")
+    if parsed.linkage_chemistry:
+        console.print(f"  Linkage chemistry: {parsed.linkage_chemistry}")
+    if parsed.application:
+        console.print(f"  Application: {parsed.application}")
+    for o in parsed.objectives:
+        console.print(f"  Objective: {o.direction.value} {o.name} (measured via {o.measurement_method})")
+    if parsed.inferred_fields:
+        console.print(f"[dim]Inferred rather than stated: {', '.join(parsed.inferred_fields)}[/dim]")
+
+    if parsed.clarifications_needed:
+        console.print("[yellow]Before continuing, I need to know:[/yellow]")
+        for question in parsed.clarifications_needed:
+            console.print(f"  - {question}")
+        raise typer.Exit(0)
+
+    if parsed.cif_path:
+        # Structure ingestion (CIF parsing, CURATED-COFs matching, linkage-chemistry
+        # classification) isn't built yet -- see ROADMAP.md. Say so plainly rather than silently
+        # dropping the CIF and guessing a target from nothing.
+        console.print(
+            "[yellow]This build can't yet go from a CIF file to a synthesis target -- structure "
+            "ingestion isn't implemented (see ROADMAP.md). Describe the COF by name, or by its "
+            "functional groups and linkage chemistry, instead.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    if not parsed.objectives:
+        console.print("[red]No optimization objective was understood from that request -- state what to maximize or minimize and how it's measured.[/red]")
+        raise typer.Exit(1)
+
+    if not parsed.cof_name and not (parsed.functional_groups and parsed.linkage_chemistry):
+        console.print("[red]I need either a COF name, or its functional groups and linkage chemistry, to search the literature.[/red]")
+        raise typer.Exit(1)
+
+    first_objective = parsed.objectives[0]
+    target = Target(
+        name=parsed.cof_name,
+        functional_groups=parsed.functional_groups,
+        linkage_chemistry=parsed.linkage_chemistry or "",
+        application=parsed.application or "",
+        metric_name=first_objective.name,
+        metric_measurement_method=first_objective.measurement_method,
+        objective_direction=first_objective.direction,
+        objectives=parsed.objectives if len(parsed.objectives) > 1 else [],
+    )
+    project_name = name or _slugify(parsed.cof_name or parsed.application or first_objective.name)
+    space_path = _create_project(project_name, target)
+
+    console.print(f"[green]Project '{project_name}' created.[/green]")
+    if len(parsed.objectives) > 1:
+        console.print("Optimizing " + ", ".join(f"{o.name} ({o.direction.value})" for o in parsed.objectives) + " together (Pareto).")
+    console.print(f"Edit [bold]{space_path}[/bold] to match this target's real synthesis parameters, then run:")
+    console.print(f"  materials-agent suggest-protocols {project_name}")
 
 
 @app.command()

@@ -18,24 +18,10 @@ from typing import Optional
 
 from materials_synthesis_agent.literature.retrieval import Paper
 from materials_synthesis_agent.llm import LLMClient, PROVIDERS
+from materials_synthesis_agent.llm.pricing import estimate_cost_usd
 from materials_synthesis_agent.schema import Citation, FieldValue, ProtocolCandidate, ProtocolSource, Target
 
 DEFAULT_MODEL = PROVIDERS["anthropic"].default_model  # kept for backwards-compatible callers
-
-# Rough, approximate per-million-token pricing for cost estimation -- versioned data (CLAUDE.md
-# convention: prices are never a silent constant baked into logic), meant to be updated as pricing
-# changes. This is an ESTIMATE for the pre-call cost display, not a source of billing truth. Looked
-# up directly, not guessed -- but this space moves fast, so treat these as approximate.
-_PRICING_PER_MTOK_USD = {
-    "claude-opus-4-5": {"input": 5.00, "output": 25.00},
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
-    "gpt-5.6": {"input": 5.00, "output": 30.00},
-    "gpt-5.6-terra": {"input": 2.00, "output": 12.00},
-    "gpt-5.6-luna": {"input": 0.20, "output": 1.20},
-    "grok-4.3": {"input": 1.25, "output": 2.50},
-    "kimi-k3": {"input": 3.00, "output": 15.00},
-}
-_DEFAULT_PRICING = {"input": 3.00, "output": 15.00}
 
 _FIELD_SCHEMA = {
     "type": "object",
@@ -115,11 +101,9 @@ def estimate_extraction_cost(target: Target, paper: Paper, model: Optional[str] 
     from materials_synthesis_agent.cli.llm_config import get_configured_model
 
     prompt = _build_prompt(target, paper)
-    input_tokens = max(len(prompt) // 4, 1)
     output_tokens = 500  # a generous estimate for a filled-out protocol tool call
     resolved_model = get_configured_model(model)
-    pricing = _PRICING_PER_MTOK_USD.get(resolved_model, _DEFAULT_PRICING)
-    return (input_tokens / 1_000_000) * pricing["input"] + (output_tokens / 1_000_000) * pricing["output"]
+    return estimate_cost_usd(prompt, output_tokens, resolved_model)
 
 
 def _field_value(raw: Optional[dict], paper: Paper) -> Optional[FieldValue]:

@@ -27,11 +27,18 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
 
 ## What it does
 
+0. **Natural-language front door** — describe what you want in your own words (`materials-agent
+   ask "..."`). An LLM parses your request into a target, the same forced-tool-use discipline the
+   literature agent uses for citations: anything it filled in by inference is shown as such, and
+   anything essential it couldn't determine — a metric you never stated, for instance — comes back
+   as a question, never a silent guess. If you mention a CIF file, it says plainly that structure
+   ingestion isn't built yet (see `ROADMAP.md`) rather than fabricating a target from nothing.
 1. **Literature agent** — retrieves papers relevant to your target's functional groups/linkage
-   chemistry (Semantic Scholar / arXiv / PubMed), extracts structured protocols (building blocks,
-   stoichiometry, solvent, modulator, temperature, time, concentration), and cites its source for
-   every field it asserts. Anything it infers rather than reads directly is flagged `inferred`, never
-   presented as sourced fact.
+   chemistry (Semantic Scholar / arXiv / PubMed) — or, if you named a specific known COF, searches
+   for that COF by name directly — extracts structured protocols (building blocks, stoichiometry,
+   solvent, modulator, temperature, time, concentration), and cites its source for every field it
+   asserts. Anything it infers rather than reads directly is flagged `inferred`, never presented as
+   sourced fact.
 2. **Feasibility checker** — validates building blocks with RDKit, checks commercial availability,
    and flags (not silently drops) protocols built on infeasible components. Optionally, once you've
    run `materials-agent setup-retrosynthesis`, a non-purchasable block gets a real retrosynthesis
@@ -73,6 +80,12 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[web]"
 
 export ANTHROPIC_API_KEY=...   # your own key; calls go directly from your machine
+
+# describe what you want in your own words -- an LLM parses it into a target, and asks instead of
+# guessing if something essential (like what to optimize for) isn't stated:
+materials-agent ask "Here's COF-5, tell me how to synthesize it to maximize crystallinity via PXRD peak ratio" --name my-cof-project
+
+# or use the typed prompts directly:
 materials-agent init my-cof-project              # prompts for your target, writes parameter_space.json
 # edit my-cof-project/parameter_space.json to match your real synthesis parameters
 materials-agent suggest-protocols my-cof-project # searches literature, shows cost estimate, confirms before spending
@@ -88,8 +101,8 @@ materials-agent setup-retrosynthesis             # shows the ~759 MB / 6-file br
 # suggest-protocols now automatically uses it for non-purchasable building blocks
 ```
 
-Run the test suite with `pytest` (49 tests, no API key needed -- LLM calls are covered with a fake
-client, see `tests/test_extraction.py`). Retrosynthesis API-shape tests
+Run the test suite with `pytest` (90 tests, no API key needed -- LLM calls are covered with a fake
+client, see `tests/test_extraction.py` and `tests/test_nl_parser.py`). Retrosynthesis API-shape tests
 (`tests/test_retrosynthesis.py`) run automatically if you've installed the `retrosynthesis` extra,
 and skip cleanly if you haven't. The real end-to-end search tests
 (`tests/test_retrosynthesis.py::TestRealSearch`) additionally need `setup-retrosynthesis` to have

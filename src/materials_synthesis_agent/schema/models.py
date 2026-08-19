@@ -92,6 +92,12 @@ class TargetObjective(BaseModel):
 
 class Target(BaseModel):
     id: str = Field(default_factory=_new_id)
+    name: Optional[str] = Field(
+        default=None,
+        description="A specific COF name (e.g. 'COF-5'), when the researcher is targeting a known "
+        "material rather than describing one by functional groups/linkage chemistry. When set, "
+        "the literature search queries by name directly -- see literature.agent.build_query.",
+    )
     functional_groups: list[str]
     linkage_chemistry: str
     application: str
@@ -218,6 +224,37 @@ class BOSuggestion(BaseModel):
         default=None, description="objective name -> predicted value (multi-objective Pareto members)."
     )
     generated_at: datetime = Field(default_factory=_now)
+
+
+class ParsedRequest(BaseModel):
+    """What an LLM understood from a researcher's free-text request (`nl.parser.parse_request`).
+
+    Same discipline as `FieldValue`, adapted from "grounded in a paper" to "grounded in what the
+    user typed": a field the model filled in without the user actually stating it must be named in
+    `inferred_fields`, and anything essential the model could not determine -- and did NOT guess at
+    -- goes in `clarifications_needed` instead. A `ParsedRequest` is an intermediate, editable
+    object; nothing downstream should treat it as a settled `Target` without the caller checking
+    these two lists first.
+    """
+
+    raw_text: str
+    cof_name: Optional[str] = None
+    cif_path: Optional[str] = Field(
+        default=None,
+        description="A file path mentioned in the text. Validated to exist on disk by the parser "
+        "before being trusted -- the model can misread a path out of prose, so an unverified path "
+        "is never handed downstream as if it were real.",
+    )
+    functional_groups: list[str] = Field(default_factory=list)
+    linkage_chemistry: Optional[str] = None
+    application: Optional[str] = None
+    objectives: list[TargetObjective] = Field(default_factory=list)
+    inferred_fields: list[str] = Field(
+        default_factory=list, description="Names of fields above the model filled in by inference/default rather than reading directly from the text."
+    )
+    clarifications_needed: list[str] = Field(
+        default_factory=list, description="Plain-language questions about anything essential that's missing or ambiguous, which the model did NOT guess at."
+    )
 
 
 class Decision(BaseModel):

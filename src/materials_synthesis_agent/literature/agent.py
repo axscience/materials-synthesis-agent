@@ -14,6 +14,12 @@ from materials_synthesis_agent.schema import ProtocolCandidate, Target
 
 
 def build_query(target: Target) -> str:
+    """A name-targeted search ("COF-5 synthesis") finds the specific paper(s) that made that exact
+    material far more reliably than a functional-group/linkage query would, so `target.name` wins
+    whenever it's set -- the functional-group query is a fallback for hypothesized COFs that don't
+    have one yet, not the default path once a name is known."""
+    if target.name:
+        return f"{target.name} synthesis"
     return f"{target.linkage_chemistry} {' '.join(target.functional_groups)} synthesis {target.application}"
 
 
