@@ -387,13 +387,29 @@ def suggest_protocols(
     papers = search(build_query(target), limit=effective_search_limit)
     estimated_cost = estimate_generation_cost(target, papers, use_full_text=full_text, unpaywall_email=unpaywall_email)
     console.print(f"Found {len(papers)} candidate papers. Estimated extraction cost: [bold]${estimated_cost:.4f}[/bold]")
+    console.print(
+        "[dim]Search proceeds by linkage chemistry: the exact COF, then same-linkage COFs. If those come up short "
+        "you'll be asked before searching related linkages (which adds cost beyond the estimate above).[/dim]"
+    )
     if full_text:
-        console.print("[dim]--full-text: extraction will try each paper's real open-access full text first, falling back to its abstract.[/dim]")
+        console.print("[dim]--full-text: extraction will try each paper's open-access full text and supplementary information first, falling back to its abstract.[/dim]")
     if not yes and not typer.confirm("Proceed?"):
         raise typer.Exit(0)
 
+    def confirm_expand(alternatives: list[str]) -> bool:
+        console.print(
+            f"[yellow]No (or too few) results within the target's own linkage "
+            f"({target.linkage_chemistry}).[/yellow] Related linkages, most similar first: "
+            f"[bold]{', '.join(alternatives)}[/bold]."
+        )
+        console.print("[dim]Protocols from a different linkage are a weaker prior and will be labeled as such.[/dim]")
+        return yes or typer.confirm("Search related linkage chemistries?")
+
     retrosynthesis_config = proj.get_global_retrosynthesis_config()
-    candidates = generate_protocols(target, n=n, search_limit=effective_search_limit, use_full_text=full_text, unpaywall_email=unpaywall_email)
+    candidates = generate_protocols(
+        target, n=n, search_limit=effective_search_limit, use_full_text=full_text,
+        unpaywall_email=unpaywall_email, confirm_expand=confirm_expand,
+    )
     for candidate in candidates:
         candidate.feasibility_flags = check_protocol_candidate(candidate, retrosynthesis_config=retrosynthesis_config)
         store.save_protocol_candidate(candidate)
@@ -401,20 +417,29 @@ def suggest_protocols(
     store.record_usage("llm_call", estimated_cost, idempotency_key=f"suggest-protocols:{target.id}:{len(candidates)}")
     store.close()
 
+    if not candidates:
+        console.print("[yellow]No usable protocols found within the linkage scope you allowed.[/yellow]")
+        return
+
     table = Table(title=f"{len(candidates)} candidate protocols")
     table.add_column("id")
     table.add_column("solvent")
     table.add_column("temp (C)")
     table.add_column("time (h)")
-    table.add_column("citation coverage")
+    table.add_column("citations")
+    table.add_column("provenance")
     table.add_column("feasibility flags")
     for c in candidates:
+        # A related-linkage candidate is a weaker prior -- surface that in the table, not just the stored note.
+        related = c.provenance_note and "DIFFERENT linkage" in c.provenance_note
+        provenance = "[yellow]related linkage[/yellow]" if related else "target linkage"
         table.add_row(
             c.id[:8],
             c.solvent.value if c.solvent else "-",
             c.temperature_c.value if c.temperature_c else "-",
             c.time_hours.value if c.time_hours else "-",
             f"{c.citation_coverage():.0%}",
+            provenance,
             "; ".join(c.feasibility_flags) or "none",
         )
     console.print(table)

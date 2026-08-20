@@ -175,6 +175,12 @@ class ProtocolCandidate(BaseModel):
     )
 
     feasibility_flags: list[str] = Field(default_factory=list)
+    provenance_note: Optional[str] = Field(
+        default=None,
+        description="How this candidate relates to the target -- e.g. extracted from a paper on the "
+        "exact COF, on a same-linkage COF, or on a COF with a related-but-different linkage "
+        "chemistry (a weaker prior, flagged so it's never silently treated as an exact match).",
+    )
     created_at: datetime = Field(default_factory=_now)
 
     def all_fields(self) -> list[FieldValue]:

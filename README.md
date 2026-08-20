@@ -52,10 +52,14 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
    for that COF by name directly — extracts structured protocols (building blocks, stoichiometry,
    solvent, modulator, temperature, time, concentration), and cites its source for every field it
    asserts. Anything it infers rather than reads directly is flagged `inferred`, never presented as
-   sourced fact. `suggest-protocols --full-text` tries each paper's real, open-access Experimental
-   Section instead of just its abstract, where abstracts don't usually state exact quantities —
-   falls back to abstract-only per paper when no open-access PDF is found (most COF literature is
-   paywalled, so expect this to help for some papers, not all).
+   sourced fact. It searches **hierarchically by linkage chemistry**: the exact COF first, then
+   COFs with the *same* linkage; if those come up short, it asks you before searching COFs with a
+   *related* linkage (e.g. an imine target falling back to hydrazone, azine, …). Anything found from
+   a different linkage is labeled a weaker prior, never silently mixed in as an exact precedent.
+   `suggest-protocols --full-text` tries each paper's real, open-access **Supplementary Information
+   and Experimental/Methods section** instead of just its abstract — that's where exact quantities,
+   ratios, temperatures, and times usually live, and the SI is often open even when the article is
+   paywalled. Falls back to abstract-only per paper when nothing open-access is found.
 2. **Feasibility checker** — validates building blocks with RDKit, checks commercial availability,
    and flags (not silently drops) protocols built on infeasible components. Optionally, once you've
    run `materials-agent setup-retrosynthesis`, a non-purchasable block gets a real retrosynthesis

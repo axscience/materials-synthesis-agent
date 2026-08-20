@@ -113,7 +113,8 @@ def test_full_text_excerpt_replaces_the_abstract_in_the_prompt():
     client = FakeClient({"found_protocol": False})
     extract_protocol(target, paper, client=client, full_text_excerpt="Synthesized using 5 mmol reagent A at 120 C.")
     prompt = client.last_call_kwargs["prompt"]
-    assert "EXPERIMENTAL SECTION EXCERPT" in prompt
+    assert "FULL-TEXT EXCERPT" in prompt
+    assert "Supplementary Information" in prompt  # the prompt now tells the model SI is where numbers live
     assert "Synthesized using 5 mmol reagent A" in prompt
     assert paper.abstract not in prompt
 

@@ -232,9 +232,15 @@ EXTRACTION_TOOL_SCHEMA = {
 
 def _build_prompt(target: Target, paper: Paper, full_text_excerpt: Optional[str] = None) -> str:
     if full_text_excerpt:
-        text_block = f"""--- EXPERIMENTAL SECTION EXCERPT (from the paper's own full text) ---
+        text_block = f"""--- FULL-TEXT EXCERPT (may include the paper's Supplementary Information and/or its \
+Experimental/Methods section) ---
 {full_text_excerpt}
---- END EXCERPT ---"""
+--- END EXCERPT ---
+
+Note: for a COF paper, the exact monomer masses/mmol, molar ratios, solvent volumes, temperatures, \
+and reaction times are usually in the Supplementary Information or the Experimental/Methods section \
+rather than the abstract. Prefer specific numbers stated there; if a section is present but a given \
+detail still isn't stated, mark that field inferred rather than inventing a value."""
     else:
         text_block = f"""--- ABSTRACT ---
 {paper.abstract or "(no abstract available)"}

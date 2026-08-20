@@ -38,7 +38,9 @@ def test_build_query_prefers_name_when_set():
     assert query == "COF-5 covalent organic framework synthesis"
 
 
-def test_build_query_falls_back_to_functional_groups_when_no_name():
+def test_build_query_falls_back_to_linkage_when_no_name():
+    # With no name, build_query returns the same-linkage tier's query: the base linkage ("imine",
+    # normalized from "imine condensation"), plus functional groups and application, deduped.
     target = Target(
         functional_groups=["imine"],
         linkage_chemistry="imine condensation",
@@ -47,7 +49,7 @@ def test_build_query_falls_back_to_functional_groups_when_no_name():
         metric_measurement_method="PXRD",
     )
     query = build_query(target)
-    assert query == "imine condensation covalent organic framework synthesis imine CO2 capture"
+    assert query == "imine covalent organic framework synthesis CO2 capture"
 
 
 def _target():

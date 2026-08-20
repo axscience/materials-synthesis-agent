@@ -6,10 +6,15 @@ confirmed is open access (`Paper.oa_pdf_url` -- see retrieval.py). A paywalled p
 `oa_pdf_url` and this module never tries to work around that. In practice, a large fraction of COF
 chemistry literature is paywalled -- confirmed directly against real OpenAlex results, not assumed
 (2 of 3 real papers checked while building this had `is_oa: False`) -- so full text is a real
-upgrade for *some* papers, not a universal replacement for abstract-only extraction. And even for
-an open-access main text, the exact molar ratios/temperature/time are very often in a separate
-Supplementary Information PDF that isn't covered by the same OA grant and often isn't linked from
-any of these APIs at all -- a real ceiling this module can't engineer around.
+upgrade for *some* papers, not a universal replacement for abstract-only extraction.
+
+The exact molar ratios/temperature/time for a COF synthesis very often live in the separate
+Supplementary Information rather than the main text -- and, importantly, the SI is frequently left
+open even when the article itself is paywalled. So this module also scrapes the paper's public
+landing page for SI links and tries those (`resolve_si_pdf_urls`, `get_supplementary_excerpt`).
+That's a best-effort HTML scrape, not a publisher API: it works where the landing page is
+server-rendered with real SI links, and returns nothing for JS-only or hard-bot-blocked pages --
+still a real ceiling for a subset of publishers, just a lower one than before.
 
 Every function here returns None on failure (no PDF, download error, unparseable PDF, no matching
 section) rather than raising -- a caller always has abstract-only extraction to fall back to, and
@@ -117,21 +122,105 @@ def extract_relevant_section(full_text: str, max_chars: int = 8000) -> str:
     return full_text[:max_chars].strip()
 
 
-def get_full_text_excerpt(paper, max_chars: int = 8000, unpaywall_email: Optional[str] = None) -> Optional[str]:
-    """End-to-end: resolve an OA PDF (the paper's own `oa_pdf_url`, or a live Unpaywall lookup as a
-    second try when the paper has a DOI but no `oa_pdf_url` already), fetch it, extract text, and
-    return the synthesis-relevant excerpt. Returns None at the first point nothing is available --
-    caller falls back to `paper.abstract`, same as if this function were never called."""
+# A supplementary-information file is worth fetching even when the main article is paywalled --
+# publishers very often leave the SI open even behind a paywalled article (confirmed as a general
+# pattern; the exact conditions/temps/molar ratios for a COF synthesis live in the SI far more
+# often than in the main text). These substrings, matched in a link's URL, flag it as an SI file
+# across the common publisher layouts (ACS suppl_file, Wiley downloadSupplement, Springer/Nature
+# MOESM/ESM, RSC suppdata, and the generic "supporting/supplementary" wording). This is a
+# best-effort HTML scrape of the article's public landing page, not a publisher API -- it works
+# where the landing page is server-rendered with real SI links and is defeated by JS-only pages or
+# hard bot-blocking, in which case it returns nothing and the caller falls back exactly as before.
+_SI_URL_MARKERS = (
+    "suppl_file", "downloadsupplement", "moesm", "_esm", "/esm/", "suppdata",
+    "supporting-information", "supplementary", "/suppl/", "_si_", "-si.pdf", "_si.pdf",
+)
+_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def resolve_si_pdf_urls(doi_or_landing_url: str, timeout_s: float = 30.0) -> list[str]:
+    """Fetch a paper's public landing page and scrape it for links to supplementary-information
+    files. `doi_or_landing_url` may be a bare DOI (resolved via https://doi.org/), a doi.org URL,
+    or a direct landing-page URL. Returns absolute candidate SI URLs, best first (PDFs before
+    other download links), or [] on any failure -- never raises."""
+    from urllib.parse import urljoin
+
+    if doi_or_landing_url.startswith("http"):
+        landing = doi_or_landing_url
+    elif "/" in doi_or_landing_url and " " not in doi_or_landing_url:
+        landing = f"https://doi.org/{doi_or_landing_url}"  # DOI-shaped
+    else:
+        return []
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; materials-synthesis-agent/0.3)"}
+    try:
+        resp = requests.get(landing, timeout=timeout_s, headers=headers)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return []
+    if "html" not in resp.headers.get("content-type", "").lower():
+        return []
+
+    final_url = str(resp.url)
+    seen: set[str] = set()
+    pdfs: list[str] = []
+    others: list[str] = []
+    for href in _HREF_RE.findall(resp.text):
+        low = href.lower()
+        if not any(marker in low for marker in _SI_URL_MARKERS):
+            continue
+        absolute = urljoin(final_url, href)
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        (pdfs if low.split("?")[0].endswith(".pdf") else others).append(absolute)
+    return pdfs + others
+
+
+def get_supplementary_excerpt(paper, max_chars: int = 8000) -> Optional[str]:
+    """Try to fetch and extract the synthesis-relevant part of a paper's supplementary information.
+    Returns None if no SI link is found on the landing page, or nothing downloadable/parseable --
+    a normal, expected outcome, never an error."""
+    landing = paper.source_id if (paper.source_id and "/" in paper.source_id) else paper.url
+    if not landing:
+        return None
+    for si_url in resolve_si_pdf_urls(landing):
+        text = fetch_pdf_text(si_url)
+        if text:
+            return extract_relevant_section(text, max_chars=max_chars)
+    return None
+
+
+def get_full_text_excerpt(
+    paper, max_chars: int = 8000, unpaywall_email: Optional[str] = None, include_supplementary: bool = True
+) -> Optional[str]:
+    """End-to-end synthesis-text resolution for one paper. Tries, in order:
+
+      1. the paper's supplementary information (where a COF's exact conditions usually live, and
+         which is usually open even when the article is paywalled), if `include_supplementary`;
+      2. the open-access main text (the paper's own `oa_pdf_url`, or a live Unpaywall lookup for a
+         DOI with no PDF already), reduced to its Experimental/Methods section.
+
+    When both are found they're combined (SI first, since it's synthesis-dense), bounded by
+    `max_chars`. Returns None only if neither yields anything -- the caller then falls back to
+    `paper.abstract`, exactly as if this function were never called."""
     from materials_synthesis_agent.literature.retrieval import resolve_oa_pdf_url_via_unpaywall
+
+    parts: list[str] = []
+
+    if include_supplementary:
+        si = get_supplementary_excerpt(paper, max_chars=max_chars)
+        if si:
+            parts.append(f"--- SUPPLEMENTARY INFORMATION ---\n{si}")
 
     pdf_url = paper.oa_pdf_url
     if not pdf_url and paper.source_id and "/" in paper.source_id:  # a DOI-shaped source_id
         pdf_url = resolve_oa_pdf_url_via_unpaywall(paper.source_id, email=unpaywall_email)
-    if not pdf_url:
-        return None
+    if pdf_url:
+        full_text = fetch_pdf_text(pdf_url)
+        if full_text:
+            parts.append(f"--- MAIN TEXT (Experimental/Methods) ---\n{extract_relevant_section(full_text, max_chars=max_chars)}")
 
-    full_text = fetch_pdf_text(pdf_url)
-    if not full_text:
+    if not parts:
         return None
-
-    return extract_relevant_section(full_text, max_chars=max_chars)
+    return "\n\n".join(parts)[:max_chars].strip()
