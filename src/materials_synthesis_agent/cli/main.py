@@ -114,6 +114,62 @@ def init(
     console.print(f"  materials-agent suggest-protocols {name}")
 
 
+def _resolve_structure(cif_path: str) -> tuple[str | None, str | None, list[str]]:
+    """Given a CIF path from a parsed request, try to resolve it to a known COF name (via the
+    CURATED-COFs structure database) or, failing that, a classified linkage chemistry (via
+    structure/linkage.py's bond-graph rules) -- structure/database.py's module docstring covers
+    why a database match is citation-backed, not a guess. Returns (name, linkage_chemistry, notes)
+    with exactly one of the first two set, or both None if nothing could be determined -- in which
+    case the caller should stop rather than guess a target from nothing."""
+    try:
+        from materials_synthesis_agent.structure import StructureDatabaseUnavailable, classify_linkage, match_cif, parse_cif
+    except ImportError:
+        return None, None, [
+            "[yellow]This build doesn't have the structure extra installed -- "
+            'pip install "materials-synthesis-agent[structure]" to identify CIF files. '
+            "Describe the COF by name or linkage chemistry instead.[/yellow]"
+        ]
+
+    try:
+        parse_cif(cif_path)
+    except Exception as exc:
+        return None, None, [f"[yellow]Couldn't parse '{cif_path}' as a CIF ({exc}). Describe the COF by name or linkage chemistry instead.[/yellow]"]
+
+    notes: list[str] = []
+    index_path = proj.get_global_structure_database_index()
+    try:
+        matches = match_cif(cif_path, index_path)
+    except StructureDatabaseUnavailable:
+        matches = []
+        notes.append(
+            "[dim]No local structure database -- run `materials-agent setup-structure-database` "
+            "to identify known COFs by structure match. Falling back to linkage classification.[/dim]"
+        )
+
+    if len(matches) == 1:
+        m = matches[0]
+        citation = f" (reported in {m.paper_title})" if m.paper_title else ""
+        notes.append(f"[green]Matched the CURATED-COFs database: {m.matched_name}{citation}.[/green]")
+        return m.matched_name, None, notes
+    if len(matches) > 1:
+        names = ", ".join(m.matched_name for m in matches)
+        notes.append(f"[yellow]Multiple CURATED-COFs entries matched this structure ({names}) -- ambiguous, falling back to linkage classification.[/yellow]")
+
+    classification = classify_linkage(cif_path)
+    if classification.linkage_chemistry and classification.confidence >= 0.5:
+        notes.append(f"[green]Classified linkage chemistry: {classification.linkage_chemistry} (confidence {classification.confidence:.0%}).[/green]")
+        for ev in classification.evidence[:2]:
+            notes.append(f"[dim]  {ev}[/dim]")
+        return None, classification.linkage_chemistry, notes
+
+    notes.append(
+        "[yellow]Couldn't identify this structure -- no database match, and linkage-chemistry "
+        "classification only covers imine and boronate-ester COFs today. Describe the COF by name "
+        "or its functional groups and linkage chemistry instead.[/yellow]"
+    )
+    return None, None, notes
+
+
 @app.command()
 def ask(
     text: str = typer.Argument(
@@ -162,15 +218,17 @@ def ask(
         raise typer.Exit(0)
 
     if parsed.cif_path:
-        # Structure ingestion (CIF parsing, CURATED-COFs matching, linkage-chemistry
-        # classification) isn't built yet -- see ROADMAP.md. Say so plainly rather than silently
-        # dropping the CIF and guessing a target from nothing.
-        console.print(
-            "[yellow]This build can't yet go from a CIF file to a synthesis target -- structure "
-            "ingestion isn't implemented (see ROADMAP.md). Describe the COF by name, or by its "
-            "functional groups and linkage chemistry, instead.[/yellow]"
-        )
-        raise typer.Exit(0)
+        resolved_name, resolved_linkage, notes = _resolve_structure(parsed.cif_path)
+        for note in notes:
+            console.print(note)
+        if resolved_name:
+            parsed = parsed.model_copy(update={"cof_name": resolved_name, "cif_path": None})
+        elif resolved_linkage:
+            parsed = parsed.model_copy(
+                update={"linkage_chemistry": parsed.linkage_chemistry or resolved_linkage, "cif_path": None}
+            )
+        else:
+            raise typer.Exit(0)
 
     if not parsed.objectives:
         console.print("[red]No optimization objective was understood from that request -- state what to maximize or minimize and how it's measured.[/red]")
@@ -603,6 +661,56 @@ def setup_retrosynthesis(
     console.print(
         f"[bold green]Done.[/bold green] Retrosynthesis configured at {config_path}. "
         "suggest-protocols will use it automatically from now on."
+    )
+
+
+@app.command()
+def setup_structure_database(
+    data_dir: str = typer.Option(
+        None, help="Where to store the downloaded database (default: ~/.materials-agent/structure-database)"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the download-size confirmation prompt."),
+):
+    """One-time download of the CURATED-COFs database (github.com/danieleongari/CURATED-COFs,
+    MIT), shared across all local projects. After this, `ask` can identify a CIF file that matches
+    an already-published, named COF -- and cite the paper that reported it -- instead of only
+    falling back to linkage-chemistry classification."""
+    try:
+        import gemmi  # noqa: F401
+    except ImportError:
+        console.print(
+            "[red]Install the structure extra first:[/red] "
+            "pip install \"materials-synthesis-agent[structure]\""
+        )
+        raise typer.Exit(1)
+
+    from materials_synthesis_agent.structure import build_index, download_curated_cofs, save_index
+
+    target_dir = proj.default_structure_database_data_dir() if data_dir is None else Path(data_dir)
+    index_path = target_dir / "index.json"
+
+    if index_path.exists():
+        console.print(f"Already set up at [bold]{index_path}[/bold].")
+        if not yes and not typer.confirm("Re-download and rebuild anyway?"):
+            proj.set_global_structure_database_index(str(index_path))
+            raise typer.Exit(0)
+
+    console.print(
+        "Downloading the CURATED-COFs database (~2.6 MB compressed / ~18.7 MB extracted, "
+        "984 CIFs -- github.com/danieleongari/CURATED-COFs, MIT license) and citation metadata."
+    )
+    if not yes and not typer.confirm(f"Download to {target_dir}?"):
+        raise typer.Exit(0)
+
+    repo_dir = download_curated_cofs(target_dir)
+    console.print(f"Downloaded to {repo_dir}. Building the fingerprint index (parsing every CIF)...")
+    entries = build_index(repo_dir)
+    save_index(entries, index_path)
+
+    proj.set_global_structure_database_index(str(index_path))
+    console.print(
+        f"[bold green]Done.[/bold green] Indexed {len(entries)} known COF structures at {index_path}. "
+        "`ask` will use it automatically from now on when you reference a CIF file."
     )
 
 

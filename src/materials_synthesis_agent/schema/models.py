@@ -181,6 +181,32 @@ class ProtocolCandidate(BaseModel):
         return grounded / len(fields)
 
 
+class StructureMatch(BaseModel):
+    """A CIF matched against a known-COF structure database (structure/database.py), citation-backed
+    via the database's own paper mapping -- never handed to Target.name without the caller
+    surfacing `source_database`/`matched_id` alongside it. Distinct from a guess: a match here
+    traces to a specific, already-published structure, the same grounding standard `Citation`
+    enforces for literature-extracted fields."""
+
+    matched_name: str
+    matched_id: str
+    source_database: str
+    paper_doi: Optional[str] = None
+    paper_title: Optional[str] = None
+
+
+class LinkageClassification(BaseModel):
+    """A structural guess at linkage chemistry from bond-graph analysis (structure/linkage.py),
+    carrying its own evidence -- never handed to Target.linkage_chemistry without the caller
+    surfacing `confidence` and `evidence` alongside it, the same discipline FieldValue enforces for
+    literature-extracted fields. `linkage_chemistry=""` and `confidence=0.0` means nothing matched,
+    not that a guess was suppressed."""
+
+    linkage_chemistry: str
+    confidence: float
+    evidence: list[str] = Field(default_factory=list)
+
+
 class Metric(BaseModel):
     """A measured result. `uncertainty=None` is allowed (a user can log a bare number), but
     `confidence` is always derived, never left to a caller or the UI to infer."""

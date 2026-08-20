@@ -8,13 +8,16 @@ as you report back lab results — recommends the next experiment to run.
 Runs entirely on your own machine, against your own LLM API key. No account, no login, no data
 leaves your machine except the literature/LLM API calls you explicitly trigger.
 
-> **Status: v0.1 and v0.2 implemented, tested, and fully wired end to end.** Literature retrieval +
-> citation-grounded extraction, RDKit feasibility checking, single- and multi-objective Bayesian
-> optimization, retrosynthesis (AiZynthFinder), the CLI, and a minimal local web UI are all real,
-> working code with a 49-test suite (`pytest`, all passing). Retrosynthesis has been run for real
-> against actual COF-relevant chemistry (see `tests/test_retrosynthesis.py::TestRealSearch`) --
-> it correctly proposed nitro-group reduction as the route to a diamine linker, the standard real
-> synthesis for that kind of compound, not a random disconnection.
+> **Status: v0.1, v0.2, and v0.3 implemented, tested, and fully wired end to end.** Literature
+> retrieval + citation-grounded extraction, RDKit feasibility checking, single- and multi-objective
+> Bayesian optimization, retrosynthesis (AiZynthFinder), a natural-language front door, CIF
+> structure identification, the CLI, and a minimal local web UI are all real, working code with a
+> 111-test suite (`pytest`, all passing). Retrosynthesis has been run for real against actual
+> COF-relevant chemistry (see `tests/test_retrosynthesis.py::TestRealSearch`) -- it correctly
+> proposed nitro-group reduction as the route to a diamine linker, the standard real synthesis for
+> that kind of compound, not a random disconnection. Structure identification has likewise been run
+> for real against the live CURATED-COFs database: 4 held-out fixtures each matched to exactly the
+> right name and citation with zero cross-matches (`tests/test_structure_database.py`).
 
 ## Why
 
@@ -31,8 +34,15 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
    ask "..."`). An LLM parses your request into a target, the same forced-tool-use discipline the
    literature agent uses for citations: anything it filled in by inference is shown as such, and
    anything essential it couldn't determine — a metric you never stated, for instance — comes back
-   as a question, never a silent guess. If you mention a CIF file, it says plainly that structure
-   ingestion isn't built yet (see `ROADMAP.md`) rather than fabricating a target from nothing.
+   as a question, never a silent guess.
+
+   Mention a CIF file and `ask` tries to identify the structure two ways: first against a local
+   copy of the CURATED-COFs database (`materials-agent setup-structure-database`, ~2.6 MB) for an
+   exact, citation-backed name match; if that comes back empty (the common case for a genuinely
+   novel, hypothesized COF), it falls back to classifying linkage chemistry from the structure's
+   real bond graph. That fallback covers **imine and boronate ester only** — the two chemistries
+   verified against real, labeled structures — and says so plainly rather than guessing at
+   hydrazone, imide, or triazine linkages it hasn't been validated against.
 1. **Literature agent** — retrieves papers relevant to your target's functional groups/linkage
    chemistry (Semantic Scholar / arXiv / PubMed) — or, if you named a specific known COF, searches
    for that COF by name directly — extracts structured protocols (building blocks, stoichiometry,
@@ -99,15 +109,24 @@ materials-agent serve my-cof-project             # http://127.0.0.1:8000, local 
 pip install -e ".[retrosynthesis]"
 materials-agent setup-retrosynthesis             # shows the ~759 MB / 6-file breakdown, confirms, downloads
 # suggest-protocols now automatically uses it for non-purchasable building blocks
+
+# optional: one-time structure-database setup, for identifying COFs from a CIF file
+pip install -e ".[structure]"
+materials-agent setup-structure-database         # downloads CURATED-COFs (~2.6 MB), builds a local index
+# ask now identifies a CIF's name (if it's a known COF) or linkage chemistry automatically
 ```
 
-Run the test suite with `pytest` (90 tests, no API key needed -- LLM calls are covered with a fake
-client, see `tests/test_extraction.py` and `tests/test_nl_parser.py`). Retrosynthesis API-shape tests
-(`tests/test_retrosynthesis.py`) run automatically if you've installed the `retrosynthesis` extra,
-and skip cleanly if you haven't. The real end-to-end search tests
-(`tests/test_retrosynthesis.py::TestRealSearch`) additionally need `setup-retrosynthesis` to have
-been run — expect each to take 80-100+ seconds, since it's a genuine tree search against a real
-trained policy network, not a stub.
+Run the test suite with `pytest` (111 tests, no API key needed -- LLM calls are covered with a fake
+client, see `tests/test_extraction.py` and `tests/test_nl_parser.py`). Retrosynthesis API-shape
+tests (`tests/test_retrosynthesis.py`) and structure tests (`tests/test_cif.py`,
+`tests/test_linkage.py`, `tests/test_structure_database.py`) run automatically if you've installed
+the corresponding extra, and skip cleanly if you haven't. The real end-to-end retrosynthesis search
+tests (`tests/test_retrosynthesis.py::TestRealSearch`) additionally need `setup-retrosynthesis` to
+have been run — expect each to take 80-100+ seconds, since it's a genuine tree search against a
+real trained policy network, not a stub. Structure tests against real CURATED-COFs fixtures
+(`tests/test_cif.py`, `tests/test_linkage.py`, and most of `tests/test_structure_database.py`) run
+offline against 4 bundled real CIFs; only `tests/test_structure_database.py::TestRealDownload`
+needs `setup-structure-database` to have been run, and it's fast (a few MB, not hundreds).
 
 ## Known limitations (found during development)
 
@@ -136,7 +155,14 @@ trained policy network, not a stub.
   available in the environment this was built in. The extraction and cost-estimation logic is
   covered by tests against a fake client (`tests/test_extraction.py`) and the retrieval half is
   verified against the real Semantic Scholar/arXiv APIs, but the full literature-to-protocol path
-  needs your own key to confirm end to end.
+  needs your own key to confirm end to end. The same applies to `nl/parser.py` (`ask`'s parsing
+  step) -- covered by `tests/test_nl_parser.py` against a fake client, not yet a real call.
+- **The linkage-chemistry classifier (`structure/linkage.py`) covers exactly two chemistries: imine
+  and boronate ester.** These are the only two verified against real, labeled CURATED-COFs
+  structures with measured bond lengths (`tests/test_linkage.py`). Hydrazone, imide, and triazine
+  linkages are not implemented -- adding bond-length thresholds for them without a labeled
+  structure to check against would be an unverified guess wearing the same confidence dressing as
+  the two chemistries that actually are verified, which is worse than just not having them yet.
 
 ## Documentation
 

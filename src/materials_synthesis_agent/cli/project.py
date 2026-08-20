@@ -77,6 +77,10 @@ def default_retrosynthesis_data_dir() -> Path:
     return global_config_dir() / "retrosynthesis-data"
 
 
+def default_structure_database_data_dir() -> Path:
+    return global_config_dir() / "structure-database"
+
+
 def _read_global_config() -> dict:
     path = global_config_path()
     if not path.exists():
@@ -95,3 +99,17 @@ def get_global_retrosynthesis_config() -> str | None:
     """Returns the configured retrosynthesis config.yml path, or None if setup-retrosynthesis
     hasn't been run -- callers treat None as "retrosynthesis not available," not an error."""
     return _read_global_config().get("retrosynthesis_config")
+
+
+def set_global_structure_database_index(index_path: str) -> None:
+    global_config_dir().mkdir(parents=True, exist_ok=True)
+    data = _read_global_config()
+    data["structure_database_index"] = index_path
+    global_config_path().write_text(json.dumps(data, indent=2))
+
+
+def get_global_structure_database_index() -> str | None:
+    """Returns the built CURATED-COFs fingerprint index path, or None if
+    setup-structure-database hasn't been run -- callers treat None as "no local structure
+    database," not an error."""
+    return _read_global_config().get("structure_database_index")
