@@ -114,6 +114,71 @@ def protocol_to_params(
     return params
 
 
+def _coerce_to_spec(spec, value) -> Optional[ParamValue]:
+    """Map a single free-text value onto one ParameterSpec (continuous clamp / categorical match),
+    or None if it doesn't fit -- the same logic protocol_to_params applies per parameter."""
+    if spec.kind == "continuous":
+        try:
+            num = float(value)
+        except (ValueError, TypeError):
+            return None
+        lo, hi = spec.bounds
+        return max(lo, min(hi, num))
+    str_val = str(value).lower()
+    for cat in spec.categories:
+        if cat.lower() == str_val or str_val in cat.lower() or cat.lower() in str_val:
+            return cat
+    return None
+
+
+def _metric_matches(metric_name: str, target_metric: str) -> bool:
+    def norm(s: str) -> str:
+        return s.lower().replace("_", "").replace(" ", "")
+    return norm(metric_name) == norm(target_metric)
+
+
+def experiment_to_params(candidate, experiment, space: ParameterSpace) -> dict[str, ParamValue]:
+    """Map one LiteratureExperiment to the parameter space: start from the protocol's base
+    conditions, then override with the conditions this specific experiment actually varied, then
+    fill any still-missing dimension with the space midpoint / first category. An optimization
+    table's rows differ only in the parameters they varied, so this recovers the real per-row point."""
+    base = protocol_to_params(candidate, space)
+    params: dict[str, ParamValue] = dict(base) if base else {}
+
+    specs_by_name = {s.name: s for s in space.specs}
+    for name, fv in experiment.conditions.items():
+        spec = specs_by_name.get(name)
+        if spec is None:
+            continue
+        coerced = _coerce_to_spec(spec, fv.value)
+        if coerced is not None:
+            params[name] = coerced
+
+    for spec in space.specs:  # fill anything still unknown
+        if spec.name in params:
+            continue
+        params[spec.name] = (spec.bounds[0] + spec.bounds[1]) / 2 if spec.kind == "continuous" else spec.categories[0]
+    return params
+
+
+def selected_experiments_to_observations(
+    candidate: ProtocolCandidate, space: ParameterSpace, target_metric: str
+) -> list[Observation]:
+    """Observations from a candidate's literature experiments the user selected for seeding, whose
+    outcome metric matches the target objective. Each experiment's own (varied) conditions become a
+    distinct data point -- this is the payload that lets the GP start from the paper's real data."""
+    observations = []
+    for exp in candidate.literature_experiments:
+        if not exp.selected_for_seeding or not _metric_matches(exp.outcome.metric_name, target_metric):
+            continue
+        observations.append(Observation(
+            params=experiment_to_params(candidate, exp, space),
+            value=exp.outcome.value,
+            uncertainty=exp.outcome.uncertainty,
+        ))
+    return observations
+
+
 def outcomes_to_observations(
     candidate: ProtocolCandidate,
     space: ParameterSpace,

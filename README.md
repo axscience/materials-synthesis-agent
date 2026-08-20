@@ -60,6 +60,10 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
    and Experimental/Methods section** instead of just its abstract — that's where exact quantities,
    ratios, temperatures, and times usually live, and the SI is often open even when the article is
    paywalled. Falls back to abstract-only per paper when nothing open-access is found.
+   Beyond the recipe, it also extracts the paper's own **experiments** — the (conditions → measured
+   outcome) rows of an optimization/screening table. `suggest-protocols` shows you those experiments
+   and lets you **select which ones seed the optimizer**; the selected data points let `suggest-next`
+   give a first recommendation straight from the literature, before you run anything in the lab.
 2. **Feasibility checker** — validates building blocks with RDKit, checks commercial availability,
    and flags (not silently drops) protocols built on infeasible components. Optionally, once you've
    run `materials-agent setup-retrosynthesis`, a non-purchasable block gets a real retrosynthesis

@@ -415,10 +415,10 @@ def suggest_protocols(
         store.save_protocol_candidate(candidate)
 
     store.record_usage("llm_call", estimated_cost, idempotency_key=f"suggest-protocols:{target.id}:{len(candidates)}")
-    store.close()
 
     if not candidates:
         console.print("[yellow]No usable protocols found within the linkage scope you allowed.[/yellow]")
+        store.close()
         return
 
     table = Table(title=f"{len(candidates)} candidate protocols")
@@ -428,6 +428,7 @@ def suggest_protocols(
     table.add_column("time (h)")
     table.add_column("citations")
     table.add_column("provenance")
+    table.add_column("experiments")
     table.add_column("feasibility flags")
     for c in candidates:
         # A related-linkage candidate is a weaker prior -- surface that in the table, not just the stored note.
@@ -440,9 +441,86 @@ def suggest_protocols(
             c.time_hours.value if c.time_hours else "-",
             f"{c.citation_coverage():.0%}",
             provenance,
+            str(len(c.literature_experiments)) or "0",
             "; ".join(c.feasibility_flags) or "none",
         )
     console.print(table)
+
+    _review_and_select_experiments(candidates, target, store, yes)
+    store.close()
+
+
+def _review_and_select_experiments(candidates, target, store, yes: bool) -> None:
+    """Display the (conditions -> outcome) experiments the papers reported, and let the user choose
+    which ones seed the optimizer. Only experiments whose outcome metric matches an objective of
+    this target are seedable -- those are the ones offered for selection. Selections are persisted
+    on the candidates; suggest-next reads them."""
+    objective_metrics = {o.name for o in target.all_objectives}
+
+    def _norm(s: str) -> str:
+        return s.lower().replace("_", "").replace(" ", "")
+    objective_norms = {_norm(m) for m in objective_metrics}
+
+    # (global_index, candidate, experiment) for every seedable experiment across all candidates.
+    seedable = []
+    non_matching = 0
+    for c in candidates:
+        for exp in c.literature_experiments:
+            if _norm(exp.outcome.metric_name) in objective_norms:
+                seedable.append((c, exp))
+            else:
+                non_matching += 1
+
+    if not seedable:
+        if non_matching:
+            console.print(f"[dim]{non_matching} literature experiment(s) found, but none measure "
+                          f"{', '.join(objective_metrics)} -- nothing to seed the optimizer with.[/dim]")
+        return
+
+    console.print(f"\n[bold]{len(seedable)} literature experiment(s)[/bold] measure your objective and can seed the optimizer:")
+    exp_table = Table()
+    exp_table.add_column("#")
+    exp_table.add_column("from protocol")
+    exp_table.add_column("conditions")
+    exp_table.add_column(f"{'/'.join(objective_metrics)}")
+    exp_table.add_column("grounding")
+    for i, (c, exp) in enumerate(seedable, 1):
+        grounded = exp.outcome.citation is not None and not exp.outcome.inferred
+        exp_table.add_row(
+            str(i), c.id[:8], exp.condition_summary(),
+            f"{exp.outcome.value} {exp.outcome.unit}",
+            "cited" if grounded else "[yellow]inferred[/yellow]",
+        )
+    console.print(exp_table)
+
+    if yes:
+        chosen = set(range(1, len(seedable) + 1))
+        console.print("[dim]--yes: selecting all literature experiments to seed the optimizer.[/dim]")
+    else:
+        console.print("Which experiments should seed the optimizer? [bold]all[/bold] / [bold]none[/bold] / comma-separated #s (e.g. 1,3,4)")
+        answer = typer.prompt("select", default="all").strip().lower()
+        if answer in ("none", ""):
+            chosen = set()
+        elif answer == "all":
+            chosen = set(range(1, len(seedable) + 1))
+        else:
+            chosen = set()
+            for tok in answer.replace(" ", "").split(","):
+                if tok.isdigit() and 1 <= int(tok) <= len(seedable):
+                    chosen.add(int(tok))
+
+    touched = {}
+    for i, (c, exp) in enumerate(seedable, 1):
+        exp.selected_for_seeding = i in chosen
+        touched[c.id] = c
+    for c in touched.values():
+        store.save_protocol_candidate(c)
+
+    if chosen:
+        console.print(f"[green]{len(chosen)} experiment(s) selected[/green] -- they'll seed the optimizer when you run "
+                      "[bold]suggest-next[/bold] (no lab work needed to get a first recommendation).")
+    else:
+        console.print("[dim]No experiments selected for seeding.[/dim]")
 
 
 @app.command()
@@ -557,11 +635,22 @@ def _suggest_next_single(name, space, store, target, candidates, experiments, ca
             continue
         observations.append(Observation(params=params, value=matching_metric.value, uncertainty=matching_metric.uncertainty))
 
+    # Seed with the literature experiments the user selected in suggest-protocols -- real
+    # (conditions -> outcome) data points from the papers, so the GP can start before any lab work.
+    from materials_synthesis_agent.literature.outcomes import selected_experiments_to_observations
+    n_lab = len(observations)
+    for c in candidates:
+        observations.extend(selected_experiments_to_observations(c, space, objective.name))
+    n_seeded = len(observations) - n_lab
+    if n_seeded:
+        console.print(f"[dim]Seeded {n_seeded} observation(s) from selected literature experiments "
+                      f"(plus {n_lab} logged lab result(s)).[/dim]")
+
     if len(observations) < 2:
         console.print(
-            f"[yellow]Only {len(observations)} usable result(s) logged -- need at least 2 for a "
-            "meaningful recommendation.[/yellow] Try one of the un-tried literature protocols from "
-            "`suggest-protocols` first, then log its result."
+            f"[yellow]Only {len(observations)} usable data point(s) (lab results + selected literature "
+            "experiments) -- need at least 2 for a meaningful recommendation.[/yellow] Either select "
+            "literature experiments in `suggest-protocols`, or log a lab result, then retry."
         )
         raise typer.Exit(0)
 

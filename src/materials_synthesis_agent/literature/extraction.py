@@ -18,7 +18,7 @@ from typing import Optional
 from materials_synthesis_agent.literature.retrieval import Paper
 from materials_synthesis_agent.llm import LLMClient, PROVIDERS
 from materials_synthesis_agent.llm.pricing import estimate_cost_usd
-from materials_synthesis_agent.schema import Citation, FieldValue, MeasuredOutcome, ProtocolCandidate, ProtocolSource, Target
+from materials_synthesis_agent.schema import Citation, FieldValue, LiteratureExperiment, MeasuredOutcome, ProtocolCandidate, ProtocolSource, Target
 
 DEFAULT_MODEL = PROVIDERS["anthropic"].default_model  # kept for backwards-compatible callers
 
@@ -215,6 +215,56 @@ EXTRACTION_TOOL_SCHEMA = {
                 "required": ["metric_name", "value", "unit", "measurement_method", "inferred"],
             },
         },
+        "experiments": {
+            "type": "array",
+            "description": (
+                "The distinct EXPERIMENTS this paper reports for the material — most valuable when the "
+                "paper screened or optimized conditions (a table where they varied solvent ratio, "
+                "temperature, modulator loading, time, etc. and measured the outcome for EACH row). "
+                "Extract one entry per condition set actually tried, pairing the conditions used with "
+                "the outcome they produced. This is what lets the optimizer learn from the paper's real "
+                "data instead of starting blind. If the paper reports only a single synthesis with one "
+                "outcome, that is one experiment. Only include an experiment if the paper genuinely "
+                "reports a measured outcome for a specific condition set — do not fabricate a grid."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": ["string", "null"],
+                        "description": "Where in the paper this came from, e.g. 'Table 1, entry 3' or 'optimized conditions'.",
+                    },
+                    "conditions": {
+                        "type": "object",
+                        "description": "The synthesis conditions used for THIS experiment. Include only the "
+                        "parameters the paper states for it; each is a value with its excerpt or inferred flag.",
+                        "properties": {
+                            "temperature_c": _FIELD_SCHEMA,
+                            "time_hours": _FIELD_SCHEMA,
+                            "solvent": _FIELD_SCHEMA,
+                            "concentration_molar": _FIELD_SCHEMA,
+                            "modulator": _FIELD_SCHEMA,
+                            "catalyst": _FIELD_SCHEMA,
+                        },
+                    },
+                    "outcome": {
+                        "type": "object",
+                        "description": "The measured result for this condition set.",
+                        "properties": {
+                            "metric_name": {"type": "string", "description": "e.g. 'crystallinity', 'BET_surface_area', 'yield'."},
+                            "value": {"type": "number"},
+                            "unit": {"type": "string", "description": "e.g. 'ratio', 'm²/g', '%'."},
+                            "uncertainty": {"type": ["number", "null"], "description": "Stated error bar if any, else null."},
+                            "measurement_method": {"type": "string", "description": "e.g. 'PXRD peak area ratio', 'N₂ adsorption at 77 K'."},
+                            "excerpt": {"type": ["string", "null"], "description": "Exact text stating this outcome value."},
+                            "inferred": {"type": "boolean", "description": "true only if derived rather than read directly."},
+                        },
+                        "required": ["metric_name", "value", "unit", "measurement_method", "inferred"],
+                    },
+                },
+                "required": ["conditions", "outcome"],
+            },
+        },
         "found_protocol": {
             "type": "boolean",
             "description": (
@@ -333,6 +383,18 @@ uses these as real data points to build its surrogate model, so precision matter
 If the paper only says "PXRD matches the simulated pattern" without a quantitative metric, \
 do NOT invent a number — report it in characterization_notes instead.
 
+EXPERIMENTS (the paper's own condition→result data — the single most valuable thing to extract):
+Many COF papers report an optimization or screening study: a table where they varied the solvent \
+ratio, temperature, modulator loading, time, or catalyst and measured the outcome (crystallinity, \
+BET, yield) for EACH condition set. Extract each of those rows as one `experiments` entry, pairing \
+the conditions used with the outcome they produced (with a `label` like "Table 1, entry 3"). These \
+become real data points the optimizer learns from directly, so the researcher isn't starting blind. \
+Rules: only include an experiment that has a measured outcome for a specific condition set; never \
+fabricate a grid of conditions the paper didn't actually run; ground every condition and every \
+outcome with an excerpt or inferred flag. If the paper reports just one synthesis with one result, \
+that is a single experiment. If it reports no measured outcome tied to conditions, leave experiments \
+empty.
+
 CITATION DISCIPLINE
 Every value you report must carry either:
 - An `excerpt`: the exact words from the paper (copy verbatim, do not paraphrase)
@@ -410,26 +472,41 @@ def extract_protocol(
     def _dict_fields(key: str) -> dict[str, FieldValue]:
         return {name: fv for name, raw in (data.get(key) or {}).items() if (fv := _field_value(raw, paper))}
 
+    def _parse_outcome(raw: dict) -> MeasuredOutcome:
+        excerpt = raw.get("excerpt")
+        inferred = bool(raw.get("inferred", False))
+        citation = None if inferred and not excerpt else Citation(
+            source_id=paper.source_id, title=paper.title, excerpt=excerpt,
+        )
+        return MeasuredOutcome(
+            metric_name=raw["metric_name"],
+            value=float(raw["value"]),
+            unit=raw["unit"],
+            uncertainty=float(raw["uncertainty"]) if raw.get("uncertainty") is not None else None,
+            measurement_method=raw["measurement_method"],
+            citation=citation,
+            inferred=inferred and not excerpt,
+        )
+
     def _parse_outcomes(raw_list: list[dict] | None) -> list[MeasuredOutcome]:
-        if not raw_list:
-            return []
-        outcomes = []
-        for raw in raw_list:
-            excerpt = raw.get("excerpt")
-            inferred = bool(raw.get("inferred", False))
-            citation = None if inferred and not excerpt else Citation(
-                source_id=paper.source_id, title=paper.title, excerpt=excerpt,
-            )
-            outcomes.append(MeasuredOutcome(
-                metric_name=raw["metric_name"],
-                value=float(raw["value"]),
-                unit=raw["unit"],
-                uncertainty=float(raw["uncertainty"]) if raw.get("uncertainty") is not None else None,
-                measurement_method=raw["measurement_method"],
-                citation=citation,
-                inferred=inferred and not excerpt,
+        return [_parse_outcome(raw) for raw in (raw_list or [])]
+
+    def _parse_experiments(raw_list: list[dict] | None) -> list[LiteratureExperiment]:
+        experiments = []
+        for raw in raw_list or []:
+            raw_outcome = raw.get("outcome")
+            if not raw_outcome or raw_outcome.get("value") is None:
+                continue  # an experiment with no measured outcome isn't a usable data point
+            conditions = {
+                name: fv for name, cond in (raw.get("conditions") or {}).items()
+                if (fv := _field_value(cond, paper)) is not None
+            }
+            experiments.append(LiteratureExperiment(
+                label=raw.get("label"),
+                conditions=conditions,
+                outcome=_parse_outcome(raw_outcome),
             ))
-        return outcomes
+        return experiments
 
     return ProtocolCandidate(
         target_id=target.id,
@@ -450,4 +527,5 @@ def extract_protocol(
         yield_percent=_field_value(data.get("yield_percent"), paper),
         characterization_notes=_field_value(data.get("characterization_notes"), paper),
         measured_outcomes=_parse_outcomes(data.get("measured_outcomes")),
+        literature_experiments=_parse_experiments(data.get("experiments")),
     )

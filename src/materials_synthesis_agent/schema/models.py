@@ -173,6 +173,12 @@ class ProtocolCandidate(BaseModel):
         "PXRD crystallinity, BET surface area, yield, etc. Real measurements that can "
         "seed the GP as observations.",
     )
+    literature_experiments: list[LiteratureExperiment] = Field(
+        default_factory=list,
+        description="Experiments (conditions → measured outcome) reported in the same paper — an "
+        "optimization/screening table becomes several grounded data points that, once the user "
+        "selects them, seed the optimizer directly.",
+    )
 
     feasibility_flags: list[str] = Field(default_factory=list)
     provenance_note: Optional[str] = Field(
@@ -248,6 +254,30 @@ class MeasuredOutcome(BaseModel):
     measurement_method: str = Field(description="e.g. 'PXRD peak area ratio', 'N₂ adsorption at 77 K'")
     citation: Optional[Citation] = None
     inferred: bool = False
+
+
+class LiteratureExperiment(BaseModel):
+    """One experiment reported in a paper for a protocol: the synthesis conditions that were used or
+    varied, paired with the measured outcome they produced. A paper's optimization/screening table
+    becomes several of these — each a real, citation-grounded (conditions → result) data point that
+    can seed the optimizer directly, instead of the researcher having to run it first.
+
+    `selected_for_seeding` gates whether this point actually enters the GP: extracted experiments are
+    shown to the user, who chooses which to trust as seeds (off until explicitly chosen)."""
+
+    label: Optional[str] = Field(
+        default=None, description="where in the paper this came from, e.g. 'Table 1, entry 3'"
+    )
+    conditions: dict[str, FieldValue] = Field(
+        default_factory=dict,
+        description="synthesis parameter name -> value (temperature_c, time_hours, solvent, "
+        "concentration_molar, modulator, catalyst) -- the conditions this experiment used",
+    )
+    outcome: MeasuredOutcome
+    selected_for_seeding: bool = False
+
+    def condition_summary(self) -> str:
+        return ", ".join(f"{k}={v.value}" for k, v in self.conditions.items()) or "(conditions not stated)"
 
 
 class Metric(BaseModel):
