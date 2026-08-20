@@ -88,3 +88,29 @@ def test_extract_protocol_calls_the_record_protocol_tool():
     extract_protocol(target, paper, client=client)
     assert client.last_call_kwargs["tool_name"] == "record_protocol"
     assert "properties" in client.last_call_kwargs["tool_schema"]  # a real JSON Schema, not a stub
+
+
+def test_full_text_excerpt_replaces_the_abstract_in_the_prompt():
+    target, paper = make_target(), make_paper()
+    client = FakeClient({"found_protocol": False})
+    extract_protocol(target, paper, client=client, full_text_excerpt="Synthesized using 5 mmol reagent A at 120 C.")
+    prompt = client.last_call_kwargs["prompt"]
+    assert "Experimental section excerpt" in prompt
+    assert "Synthesized using 5 mmol reagent A" in prompt
+    assert paper.abstract not in prompt
+
+
+def test_no_full_text_excerpt_still_uses_the_abstract():
+    target, paper = make_target(), make_paper()
+    client = FakeClient({"found_protocol": False})
+    extract_protocol(target, paper, client=client)
+    prompt = client.last_call_kwargs["prompt"]
+    assert "Abstract/text" in prompt
+    assert paper.abstract in prompt
+
+
+def test_estimate_extraction_cost_with_full_text_reflects_the_larger_prompt():
+    target, paper = make_target(), make_paper()
+    abstract_only = estimate_extraction_cost(target, paper)
+    with_full_text = estimate_extraction_cost(target, paper, full_text_excerpt="x" * 5000)
+    assert with_full_text > abstract_only

@@ -28,6 +28,10 @@ dependencies = [
     # three expose an OpenAI-compatible chat-completions + tool-calling surface) -- see llm/.
     "openai>=1.0",
     "rdkit>=2024.3",
+    # Zero runtime dependencies of its own (confirmed via `pip show pypdf`) -- safe in core rather
+    # than an optional extra. Used by literature/fulltext.py to extract text from an open-access
+    # paper's PDF for full-text extraction, instead of abstract-only.
+    "pypdf>=5.0",
     # torch 2.2.x is compiled against the NumPy 1.x ABI; scipy>=1.13 requires NumPy>=2.0.
     # Until a torch build against NumPy 2 is available in your install environment, numpy and
     # scipy are pinned below torch's compatibility ceiling. Revisit this pin once torch>=2.3

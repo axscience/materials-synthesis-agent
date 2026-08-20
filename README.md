@@ -9,15 +9,19 @@ Runs entirely on your own machine, against your own LLM API key. No account, no 
 leaves your machine except the literature/LLM API calls you explicitly trigger.
 
 > **Status: v0.1, v0.2, and v0.3 implemented, tested, and fully wired end to end.** Literature
-> retrieval + citation-grounded extraction, RDKit feasibility checking, single- and multi-objective
-> Bayesian optimization, retrosynthesis (AiZynthFinder), a natural-language front door, CIF
-> structure identification, the CLI, and a minimal local web UI are all real, working code with a
-> 111-test suite (`pytest`, all passing). Retrosynthesis has been run for real against actual
-> COF-relevant chemistry (see `tests/test_retrosynthesis.py::TestRealSearch`) -- it correctly
-> proposed nitro-group reduction as the route to a diamine linker, the standard real synthesis for
-> that kind of compound, not a random disconnection. Structure identification has likewise been run
-> for real against the live CURATED-COFs database: 4 held-out fixtures each matched to exactly the
-> right name and citation with zero cross-matches (`tests/test_structure_database.py`).
+> retrieval + citation-grounded extraction (including real open-access full-text extraction, not
+> just abstracts), RDKit feasibility checking, single- and multi-objective Bayesian optimization,
+> retrosynthesis (AiZynthFinder), a natural-language front door, CIF structure identification, the
+> CLI, and a minimal local web UI are all real, working code with a 141-test suite (`pytest`, all
+> passing). Retrosynthesis has been run for real against actual COF-relevant chemistry (see
+> `tests/test_retrosynthesis.py::TestRealSearch`) -- it correctly proposed nitro-group reduction as
+> the route to a diamine linker, the standard real synthesis for that kind of compound, not a random
+> disconnection. Structure identification has likewise been run for real against the live
+> CURATED-COFs database: 4 held-out fixtures each matched to exactly the right name and citation
+> with zero cross-matches (`tests/test_structure_database.py`). Full-text extraction has been run
+> against real open-access papers too: a real Nature Communications COF paper's Experimental Section
+> was correctly located and yielded a genuine, quantitative synthesis procedure (exact reagent
+> masses, mmol, solvent volumes, reflux time) that its abstract never mentioned.
 
 ## Why
 
@@ -44,11 +48,14 @@ tool anyone can run, not a one-off research prototype tied to one lab's internal
    verified against real, labeled structures — and says so plainly rather than guessing at
    hydrazone, imide, or triazine linkages it hasn't been validated against.
 1. **Literature agent** — retrieves papers relevant to your target's functional groups/linkage
-   chemistry (Semantic Scholar / arXiv / PubMed) — or, if you named a specific known COF, searches
+   chemistry (Semantic Scholar / OpenAlex / arXiv) — or, if you named a specific known COF, searches
    for that COF by name directly — extracts structured protocols (building blocks, stoichiometry,
    solvent, modulator, temperature, time, concentration), and cites its source for every field it
    asserts. Anything it infers rather than reads directly is flagged `inferred`, never presented as
-   sourced fact.
+   sourced fact. `suggest-protocols --full-text` tries each paper's real, open-access Experimental
+   Section instead of just its abstract, where abstracts don't usually state exact quantities —
+   falls back to abstract-only per paper when no open-access PDF is found (most COF literature is
+   paywalled, so expect this to help for some papers, not all).
 2. **Feasibility checker** — validates building blocks with RDKit, checks commercial availability,
    and flags (not silently drops) protocols built on infeasible components. Optionally, once you've
    run `materials-agent setup-retrosynthesis`, a non-purchasable block gets a real retrosynthesis
@@ -99,6 +106,7 @@ materials-agent ask "Here's COF-5, tell me how to synthesize it to maximize crys
 materials-agent init my-cof-project              # prompts for your target, writes parameter_space.json
 # edit my-cof-project/parameter_space.json to match your real synthesis parameters
 materials-agent suggest-protocols my-cof-project # searches literature, shows cost estimate, confirms before spending
+materials-agent suggest-protocols my-cof-project --full-text   # also tries each paper's real open-access full text
 materials-agent log-result my-cof-project <candidate-id> --value 0.7 --uncertainty 0.05
 materials-agent suggest-next my-cof-project      # Bayesian-optimization recommendation
 
@@ -116,14 +124,16 @@ materials-agent setup-structure-database         # downloads CURATED-COFs (~2.6 
 # ask now identifies a CIF's name (if it's a known COF) or linkage chemistry automatically
 ```
 
-Run the test suite with `pytest` (111 tests, no API key needed -- LLM calls are covered with a fake
-client, see `tests/test_extraction.py` and `tests/test_nl_parser.py`). Retrosynthesis API-shape
-tests (`tests/test_retrosynthesis.py`) and structure tests (`tests/test_cif.py`,
-`tests/test_linkage.py`, `tests/test_structure_database.py`) run automatically if you've installed
-the corresponding extra, and skip cleanly if you haven't. The real end-to-end retrosynthesis search
-tests (`tests/test_retrosynthesis.py::TestRealSearch`) additionally need `setup-retrosynthesis` to
-have been run — expect each to take 80-100+ seconds, since it's a genuine tree search against a
-real trained policy network, not a stub. Structure tests against real CURATED-COFs fixtures
+Run the test suite with `pytest` (141 tests, no API key needed -- LLM calls are covered with a fake
+client, see `tests/test_extraction.py` and `tests/test_nl_parser.py`; PDF fetching in
+`tests/test_fulltext.py` is tested against a real, hand-built minimal PDF with the network mocked).
+Retrosynthesis API-shape tests (`tests/test_retrosynthesis.py`) and structure tests
+(`tests/test_cif.py`, `tests/test_linkage.py`, `tests/test_structure_database.py`) run
+automatically if you've installed the corresponding extra, and skip cleanly if you haven't. The
+real end-to-end retrosynthesis search tests (`tests/test_retrosynthesis.py::TestRealSearch`)
+additionally need `setup-retrosynthesis` to have been run — expect each to take 80-100+ seconds,
+since it's a genuine tree search against a real trained policy network, not a stub. Structure tests
+against real CURATED-COFs fixtures
 (`tests/test_cif.py`, `tests/test_linkage.py`, and most of `tests/test_structure_database.py`) run
 offline against 4 bundled real CIFs; only `tests/test_structure_database.py::TestRealDownload`
 needs `setup-structure-database` to have been run, and it's fast (a few MB, not hundreds).

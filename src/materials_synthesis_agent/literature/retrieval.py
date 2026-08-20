@@ -35,6 +35,9 @@ class Paper:
     year: Optional[int]
     url: str
     source: str  # "semantic_scholar" | "openalex" | "arxiv"
+    oa_pdf_url: Optional[str] = None  # a direct, fetchable PDF URL, only when the source API says
+    # the paper is genuinely open access -- None means "no legally fetchable full text found here,"
+    # not "this field wasn't populated." See literature/fulltext.py, which only ever reads this.
 
 
 class RateLimitedError(RuntimeError):
@@ -48,7 +51,11 @@ def search_semantic_scholar(
 ) -> list[Paper]:
     api_key = api_key or os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
     headers = {"x-api-key": api_key} if api_key else {}
-    params = {"query": query, "limit": limit, "fields": "title,abstract,year,externalIds,url"}
+    # openAccessPdf is documented in Semantic Scholar's public Graph API field list
+    # (api.semanticscholar.org/api-docs) as {url, status} -- requested here but not live-verified
+    # in this environment (every real call so far has been rate-limited before reaching a
+    # response); treat it the same as any other field this parser reads defensively.
+    params = {"query": query, "limit": limit, "fields": "title,abstract,year,externalIds,url,openAccessPdf"}
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries + 1):
@@ -68,6 +75,7 @@ def search_semantic_scholar(
         for item in data.get("data", []):
             external_ids = item.get("externalIds") or {}
             source_id = external_ids.get("DOI") or item.get("paperId")
+            oa_pdf = item.get("openAccessPdf") or {}
             papers.append(
                 Paper(
                     source_id=source_id,
@@ -76,6 +84,7 @@ def search_semantic_scholar(
                     year=item.get("year"),
                     url=item.get("url") or f"https://www.semanticscholar.org/paper/{item.get('paperId')}",
                     source="semantic_scholar",
+                    oa_pdf_url=oa_pdf.get("url"),
                 )
             )
         return papers
@@ -109,6 +118,11 @@ def search_openalex(query: str, limit: int = 10, timeout_s: float = 15.0, mailto
     for item in data.get("results", [])[:limit]:
         doi = item.get("doi") or ""
         source_id = doi.removeprefix("https://doi.org/") if doi else item.get("id", "")
+        # best_oa_location.pdf_url -- confirmed against real live responses (not assumed): present
+        # for genuinely open-access papers, None otherwise. A landing_page_url with no pdf_url
+        # (an institutional-repository page, say) is deliberately NOT used here -- it's HTML, not
+        # a fetchable PDF, and scraping arbitrary landing pages is out of scope.
+        best_oa = item.get("best_oa_location") or {}
         papers.append(
             Paper(
                 source_id=source_id,
@@ -117,6 +131,7 @@ def search_openalex(query: str, limit: int = 10, timeout_s: float = 15.0, mailto
                 year=item.get("publication_year"),
                 url=item.get("id") or (doi or ""),
                 source="openalex",
+                oa_pdf_url=best_oa.get("pdf_url"),
             )
         )
     return papers
@@ -135,10 +150,37 @@ def search_arxiv(query: str, limit: int = 10, timeout_s: float = 15.0) -> list[P
         summary = (entry.findtext("atom:summary", default=None, namespaces=ARXIV_NS) or "").strip() or None
         published = entry.findtext("atom:published", default="", namespaces=ARXIV_NS)
         year = int(published[:4]) if published[:4].isdigit() else None
+        # arXiv papers are inherently open access -- the PDF URL is a direct, documented
+        # transformation of the abstract-page URL (arxiv.org/abs/X -> arxiv.org/pdf/X), not a guess.
+        oa_pdf_url = arxiv_id.replace("/abs/", "/pdf/") if "/abs/" in arxiv_id else None
         papers.append(
-            Paper(source_id=arxiv_id, title=title, abstract=summary, year=year, url=arxiv_id, source="arxiv")
+            Paper(source_id=arxiv_id, title=title, abstract=summary, year=year, url=arxiv_id, source="arxiv", oa_pdf_url=oa_pdf_url)
         )
     return papers
+
+
+UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
+
+
+def resolve_oa_pdf_url_via_unpaywall(doi: str, email: Optional[str] = None, timeout_s: float = 15.0) -> Optional[str]:
+    """Secondary OA-PDF resolver for a paper whose search result didn't already carry one
+    (`Paper.oa_pdf_url`) but does have a DOI. Unpaywall requires a real contact email per its terms
+    -- it rejects placeholder addresses (confirmed directly: a generic example.com address gets a
+    real 422 "please use your own email" response) -- so this is a no-op, not an error, when no
+    email is configured. Implemented against Unpaywall's documented response shape
+    (`best_oa_location.url_for_pdf`); not live-verified end-to-end in this environment for the same
+    reason -- no real contact email was available to test with."""
+    email = email or os.environ.get("UNPAYWALL_EMAIL") or os.environ.get("OPENALEX_MAILTO")
+    if not email or not doi:
+        return None
+    try:
+        resp = requests.get(f"{UNPAYWALL_BASE}/{doi}", params={"email": email}, timeout=timeout_s)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+    data = resp.json()
+    best = data.get("best_oa_location") or {}
+    return best.get("url_for_pdf")
 
 
 def search(query: str, limit: int = 10, semantic_scholar_api_key: Optional[str] = None) -> list[Paper]:

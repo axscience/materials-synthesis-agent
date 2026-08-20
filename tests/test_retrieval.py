@@ -8,8 +8,11 @@ import requests
 
 from materials_synthesis_agent.literature.retrieval import (
     RateLimitedError,
+    resolve_oa_pdf_url_via_unpaywall,
     search,
+    search_arxiv,
     search_openalex,
+    search_semantic_scholar,
 )
 
 
@@ -23,7 +26,7 @@ def _response(status_code=200, json_data=None):
     return resp
 
 
-def _openalex_work(title="A COF paper", year=2020, doi="https://doi.org/10.1000/x", abstract_words=None):
+def _openalex_work(title="A COF paper", year=2020, doi="https://doi.org/10.1000/x", abstract_words=None, oa_pdf_url=None):
     aii = None
     if abstract_words:
         aii = {word: [i] for i, word in enumerate(abstract_words)}
@@ -33,6 +36,7 @@ def _openalex_work(title="A COF paper", year=2020, doi="https://doi.org/10.1000/
         "display_name": title,
         "publication_year": year,
         "abstract_inverted_index": aii,
+        "best_oa_location": {"pdf_url": oa_pdf_url} if oa_pdf_url else {},
     }
 
 
@@ -78,6 +82,88 @@ def test_search_falls_back_to_openalex_when_semantic_scholar_is_rate_limited():
         papers = search("x", limit=5)
     assert len(papers) == 1
     assert papers[0].source == "openalex"
+
+
+def test_search_openalex_populates_oa_pdf_url_when_genuinely_open_access():
+    work = _openalex_work(oa_pdf_url="https://example.org/real.pdf")
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=_response(json_data={"results": [work]})):
+        papers = search_openalex("x", limit=10)
+    assert papers[0].oa_pdf_url == "https://example.org/real.pdf"
+
+
+def test_search_openalex_leaves_oa_pdf_url_none_when_not_open_access():
+    work = _openalex_work(oa_pdf_url=None)
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=_response(json_data={"results": [work]})):
+        papers = search_openalex("x", limit=10)
+    assert papers[0].oa_pdf_url is None
+
+
+def test_search_openalex_ignores_a_landing_page_with_no_direct_pdf():
+    # A real, common OpenAlex shape: is_oa=True but best_oa_location only has a landing page, no
+    # pdf_url -- confirmed against a real response while building this. Not fetchable as a PDF, so
+    # oa_pdf_url must stay None, not fall back to the landing page URL.
+    work = _openalex_work()
+    work["best_oa_location"] = {"pdf_url": None, "landing_page_url": "https://example.org/landing"}
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=_response(json_data={"results": [work]})):
+        papers = search_openalex("x", limit=10)
+    assert papers[0].oa_pdf_url is None
+
+
+def test_search_semantic_scholar_populates_oa_pdf_url():
+    item = {
+        "paperId": "abc", "title": "t", "abstract": "a", "year": 2020, "url": "u",
+        "externalIds": {"DOI": "10.1/x"}, "openAccessPdf": {"url": "https://example.org/s2.pdf"},
+    }
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=_response(json_data={"data": [item]})):
+        papers = search_semantic_scholar("x", limit=10)
+    assert papers[0].oa_pdf_url == "https://example.org/s2.pdf"
+
+
+def test_search_arxiv_derives_oa_pdf_url_from_abs_url():
+    resp = Mock()
+    resp.status_code = 200
+    resp.text = """<feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/abs/2301.12345</id>
+        <title>A paper</title>
+        <summary>abstract text</summary>
+        <published>2023-01-01T00:00:00Z</published>
+      </entry>
+    </feed>"""
+    resp.raise_for_status = Mock()
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=resp):
+        papers = search_arxiv("x", limit=5)
+    assert papers[0].oa_pdf_url == "http://arxiv.org/pdf/2301.12345"
+
+
+def test_resolve_oa_pdf_url_via_unpaywall_returns_none_without_an_email():
+    with patch.dict("os.environ", {}, clear=True):
+        assert resolve_oa_pdf_url_via_unpaywall("10.1000/x", email=None) is None
+
+
+def test_resolve_oa_pdf_url_via_unpaywall_returns_none_without_a_doi():
+    assert resolve_oa_pdf_url_via_unpaywall("", email="real@example.org") is None
+
+
+def test_resolve_oa_pdf_url_via_unpaywall_returns_the_pdf_url_on_success():
+    resp = Mock()
+    resp.status_code = 200
+    resp.json.return_value = {"best_oa_location": {"url_for_pdf": "https://example.org/real.pdf"}}
+    resp.raise_for_status = Mock()
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=resp) as mock_get:
+        url = resolve_oa_pdf_url_via_unpaywall("10.1000/x", email="real@example.org")
+    assert url == "https://example.org/real.pdf"
+    assert mock_get.call_args.kwargs["params"]["email"] == "real@example.org"
+
+
+def test_resolve_oa_pdf_url_via_unpaywall_returns_none_on_request_failure():
+    # Confirmed against the real API: a placeholder email gets a real 422 rejection.
+    resp = Mock()
+    resp.status_code = 422
+    resp.raise_for_status = Mock(side_effect=requests.HTTPError("422"))
+    with patch("materials_synthesis_agent.literature.retrieval.requests.get", return_value=resp):
+        url = resolve_oa_pdf_url_via_unpaywall("10.1000/x", email="placeholder@example.com")
+    assert url is None
 
 
 def test_search_falls_back_to_arxiv_when_both_semantic_scholar_and_openalex_fail():

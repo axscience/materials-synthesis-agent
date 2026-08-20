@@ -74,7 +74,17 @@ EXTRACTION_TOOL_SCHEMA = {
 }
 
 
-def _build_prompt(target: Target, paper: Paper) -> str:
+def _build_prompt(target: Target, paper: Paper, full_text_excerpt: Optional[str] = None) -> str:
+    # A full-text excerpt is real prose from the paper's own Experimental/Methods section (see
+    # literature/fulltext.py) -- labeled as such, distinctly from the abstract, so the model knows
+    # it's reading a targeted excerpt of the real procedure, not a summary of the whole paper.
+    if full_text_excerpt:
+        text_block = f"""Experimental section excerpt (from the paper's own full text, not the abstract):
+{full_text_excerpt}"""
+    else:
+        text_block = f"""Abstract/text:
+{paper.abstract or "(no abstract available)"}"""
+
     return f"""You are extracting a covalent organic framework (or related material) synthesis
 protocol from a research paper, for a researcher targeting:
 
@@ -83,24 +93,26 @@ protocol from a research paper, for a researcher targeting:
 - Application: {target.application}
 
 Paper: "{paper.title}" ({paper.year or "year unknown"})
-Abstract/text:
-{paper.abstract or "(no abstract available)"}
+{text_block}
 
-Call record_protocol with what you can extract. If the abstract doesn't describe a synthesis
+Call record_protocol with what you can extract. If the text doesn't describe a synthesis
 protocol in enough detail, set found_protocol=false and leave other fields empty rather than
 guessing. Every field you do report needs either a direct excerpt or inferred=true -- never both
 missing."""
 
 
-def estimate_extraction_cost(target: Target, paper: Paper, model: Optional[str] = None) -> float:
+def estimate_extraction_cost(
+    target: Target, paper: Paper, model: Optional[str] = None, full_text_excerpt: Optional[str] = None
+) -> float:
     """Rough pre-call cost estimate in USD, for the confirm-before-spending UI. Token count is
     approximated at ~4 chars/token -- adequate for a pre-call estimate, not billing-accurate.
     `model=None` resolves to whichever model the configured provider will actually use (see
     cli/llm_config.get_configured_model) -- not always Anthropic's default, now that there are
-    four providers."""
+    four providers. Pass the same `full_text_excerpt` you'll pass to `extract_protocol` -- a
+    full-text prompt is real input tokens, not a rounding error against an abstract-only estimate."""
     from materials_synthesis_agent.cli.llm_config import get_configured_model
 
-    prompt = _build_prompt(target, paper)
+    prompt = _build_prompt(target, paper, full_text_excerpt=full_text_excerpt)
     output_tokens = 500  # a generous estimate for a filled-out protocol tool call
     resolved_model = get_configured_model(model)
     return estimate_cost_usd(prompt, output_tokens, resolved_model)
@@ -121,13 +133,19 @@ def extract_protocol(
     client: Optional[LLMClient] = None,
     model: Optional[str] = None,
     dry_run: bool = False,
+    full_text_excerpt: Optional[str] = None,
 ) -> ProtocolCandidate | float:
     """Extract a ProtocolCandidate from one paper. Returns the estimated cost (float, USD) if
     dry_run=True, without making a call. `client` is dependency-injected so this is testable with
     a fake client that never hits the network -- see tests/test_extraction.py. If `client` is
-    None, one is built from the configured provider (see cli/llm_config.py)."""
+    None, one is built from the configured provider (see cli/llm_config.py).
+
+    `full_text_excerpt`, if given (see literature/fulltext.py), is used instead of `paper.abstract`
+    -- this function makes no network calls itself and does no OA/PDF resolution; that's the
+    caller's job (literature/agent.py), keeping this module's only responsibility "build a prompt
+    from whatever text I'm handed, call the LLM, parse the result.\""""
     if dry_run:
-        return estimate_extraction_cost(target, paper, model=model)
+        return estimate_extraction_cost(target, paper, model=model, full_text_excerpt=full_text_excerpt)
 
     if client is None:
         from materials_synthesis_agent.cli.llm_config import get_configured_llm_client
@@ -135,7 +153,7 @@ def extract_protocol(
         client = get_configured_llm_client(model=model)
 
     data = client.call_tool(
-        prompt=_build_prompt(target, paper),
+        prompt=_build_prompt(target, paper, full_text_excerpt=full_text_excerpt),
         tool_name=EXTRACTION_TOOL_NAME,
         tool_description=EXTRACTION_TOOL_DESCRIPTION,
         tool_schema=EXTRACTION_TOOL_SCHEMA,

@@ -298,6 +298,19 @@ def configure():
 def suggest_protocols(
     name: str,
     n: int = typer.Option(5, help="Number of candidate protocols to generate."),
+    search_limit: int = typer.Option(None, "--search-limit", help="Papers to search before extracting (default: 3x n)."),
+    full_text: bool = typer.Option(
+        False, "--full-text",
+        help="Try to extract from each paper's real, open-access full text (Experimental section) instead of just "
+        "its abstract. Falls back to abstract-only per paper when no open-access PDF is found -- most COF "
+        "chemistry literature is paywalled, so expect this to help for only some papers, not all.",
+    ),
+    unpaywall_email: str = typer.Option(
+        None, "--unpaywall-email",
+        help="Contact email for Unpaywall's secondary OA-PDF lookup (only used with --full-text, for papers "
+        "OpenAlex/Semantic Scholar didn't already give a PDF for). Falls back to $UNPAYWALL_EMAIL / "
+        "$OPENALEX_MAILTO. Unpaywall requires a real address -- it rejects placeholder ones.",
+    ),
     yes: bool = typer.Option(False, "--yes", help="Skip the cost-estimate confirmation prompt."),
 ):
     """Search the literature and extract N citation-grounded candidate protocols."""
@@ -311,14 +324,17 @@ def suggest_protocols(
     store = Store(proj.db_path(name))
     target = _load_target(name, store)
 
-    papers = search(build_query(target), limit=n * 3)
-    estimated_cost = estimate_generation_cost(target, papers[: n * 3])
+    effective_search_limit = search_limit or n * 3
+    papers = search(build_query(target), limit=effective_search_limit)
+    estimated_cost = estimate_generation_cost(target, papers, use_full_text=full_text, unpaywall_email=unpaywall_email)
     console.print(f"Found {len(papers)} candidate papers. Estimated extraction cost: [bold]${estimated_cost:.4f}[/bold]")
+    if full_text:
+        console.print("[dim]--full-text: extraction will try each paper's real open-access full text first, falling back to its abstract.[/dim]")
     if not yes and not typer.confirm("Proceed?"):
         raise typer.Exit(0)
 
     retrosynthesis_config = proj.get_global_retrosynthesis_config()
-    candidates = generate_protocols(target, n=n)
+    candidates = generate_protocols(target, n=n, search_limit=effective_search_limit, use_full_text=full_text, unpaywall_email=unpaywall_email)
     for candidate in candidates:
         candidate.feasibility_flags = check_protocol_candidate(candidate, retrosynthesis_config=retrosynthesis_config)
         store.save_protocol_candidate(candidate)
