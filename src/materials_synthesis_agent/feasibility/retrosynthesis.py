@@ -1,4 +1,4 @@
-"""Retrosynthesis check via AiZynthFinder -- v0.2 (ROADMAP.md). Fully verified, not just written.
+"""Retrosynthesis check via AiZynthFinder. Fully verified, not just written.
 
 Install: `pip install "materials-synthesis-agent[retrosynthesis]"` (pins `numba<0.61` so pip
 resolves an `llvmlite` version with a real Intel-macOS wheel, instead of the newest `numba`, which

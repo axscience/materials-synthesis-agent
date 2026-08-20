@@ -1,7 +1,7 @@
 """Parameter-space definition and encoding between the abstract protocol-parameter space and the
 tensors BoTorch needs.
 
-Deliberately reusable, not COF-specific (CLAUDE.md guardrail #6): a ParameterSpec list is passed in
+Deliberately reusable, not COF-specific: a ParameterSpec list is passed in
 by the caller, nothing here hardcodes temperature/solvent/etc.
 """
 

@@ -1,7 +1,7 @@
 """Free-text request parsing: the researcher's own words in ("here's a CIF of a COF, tell me how
 to synthesize it to maximize crystallinity via PXRD peak ratio"), a structured ParsedRequest out.
 
-Same forced-tool-use discipline as literature/extraction.py (CLAUDE.md guardrail #2, extended from
+Same forced-tool-use discipline as literature/extraction.py (extended from
 "grounded in a paper" to "grounded in what the user typed"): the model must call one tool, and the
 tool schema requires it to separate what the text actually stated from what it filled in by
 inference (`inferred_fields`) or could not determine at all (`clarifications_needed` -- a question
@@ -9,11 +9,11 @@ handed back to the user, never a silent guess at a metric, application, or objec
 nobody mentioned).
 
 A `cif_path` the model reports is a string it read out of prose, not a verified fact -- `parse_request`
-checks the path actually exists before trusting it, same principle as CLAUDE.md guardrail #4 (no
-dynamic execution of model output): the model's output drives what gets *asked* of the local
+checks the path actually exists before trusting it (no dynamic execution of model output): the
+model's output drives what gets *asked* of the local
 filesystem, never gets executed or trusted blindly.
 
-Every call that costs money supports `dry_run=True` (CLAUDE.md convention).
+Every call that costs money supports `dry_run=True`.
 """
 
 from __future__ import annotations

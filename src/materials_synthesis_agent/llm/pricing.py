@@ -1,6 +1,6 @@
 """Shared per-million-token pricing table for pre-call cost estimation.
 
-Versioned data (CLAUDE.md convention: prices are never a silent constant baked into logic), meant
+Versioned data (prices are never a silent constant baked into logic), meant
 to be updated as pricing changes. This is an ESTIMATE for the pre-call cost display, not a source
 of billing truth. Looked up directly, not guessed -- but this space moves fast, so treat these as
 approximate. Shared by every module that estimates an LLM call's cost before running it

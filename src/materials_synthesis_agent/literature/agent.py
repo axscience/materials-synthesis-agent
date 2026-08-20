@@ -1,6 +1,5 @@
 """Orchestrates retrieval + extraction: given a Target, search relevant papers and extract N
-citation-grounded candidate protocols. This is what the CLI's `suggest-protocols` command and
-materials-copilot's literature job both call.
+citation-grounded candidate protocols. This is what the CLI's `suggest-protocols` command calls.
 """
 
 from __future__ import annotations

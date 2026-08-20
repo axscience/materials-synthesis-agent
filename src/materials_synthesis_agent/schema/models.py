@@ -1,7 +1,7 @@
 """Versioned, portable data models -- the contract between this package and any consumer
-(the local CLI, the local web UI, or materials-copilot's Postgres layer).
+(the local CLI or the local web UI).
 
-Guardrails this module exists to enforce (see CLAUDE.md):
+Invariants this module enforces:
   - No Metric reaches the optimizer without a stated uncertainty, or it is flagged low_confidence.
   - Every literature-derived field on a ProtocolCandidate traces to a Citation, or is marked
     inferred=True. Never silently presented as sourced fact.
@@ -72,7 +72,7 @@ class FieldValue(BaseModel):
             raise ValueError(
                 "A FieldValue must either carry a citation or be explicitly flagged inferred=True. "
                 "Presenting an extracted value as sourced fact with no traceable source is exactly "
-                "what CLAUDE.md guardrail #2 forbids."
+                "presenting an extracted value as sourced fact with no traceable source."
             )
         return self
 

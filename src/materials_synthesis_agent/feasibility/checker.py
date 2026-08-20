@@ -1,7 +1,7 @@
 """Feasibility checking: RDKit validity + commercial-availability lookup.
 
-v0.1 scope only (CLAUDE.md guardrail #8): validity + purchasability. Retrosynthesis is a v0.2
-optional adapter (see `feasibility.retrosynthesis`) with a separate, heavier dependency.
+Base scope: validity + purchasability. Retrosynthesis is an optional adapter (see
+`feasibility.retrosynthesis`) with a separate, heavier dependency.
 
 Infeasible building blocks are flagged on the ProtocolCandidate, never silently dropped -- the user
 decides what to do with an infeasible suggestion, the checker's job is only to surface the flag.

@@ -1,7 +1,7 @@
-"""Multi-objective (Pareto) Bayesian optimization -- v0.2, ROADMAP.md.
+"""Multi-objective (Pareto) Bayesian optimization.
 
 Returns a set of Pareto-optimal suggestions, never a single scalarized number: the user picks the
-tradeoff (CLAUDE.md convention, mirrored from the platform-level guardrail against silently
+tradeoff (rather than silently
 collapsing yield/crystallinity/cost into one ranked score).
 
 Uses one independent MixedSingleTaskGP per objective (ModelListGP) and

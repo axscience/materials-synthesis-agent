@@ -1,8 +1,7 @@
 """CLI entrypoints: ask, init, suggest-protocols, log-result, suggest-next.
 
 Every command that spends money (ask, suggest-protocols) shows a cost estimate and asks for
-confirmation before running, unless --yes is passed -- CLAUDE.md guardrail on cost governance,
-enforced locally the same way materials-copilot enforces it for hosted users.
+confirmation before running, unless --yes is passed.
 """
 
 from __future__ import annotations

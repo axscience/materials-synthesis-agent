@@ -4,7 +4,7 @@ disk. A project is just a directory -- `<name>/agent.db` (Store) + `<name>/param
 The parameter space is defined explicitly by the user, not inferred from literature-extracted text.
 Free-text protocol fields ("value": "120", "excerpt": "heated at 120 C") are not automatically
 trustworthy as BO input types/bounds -- silently guessing them would be exactly the kind of
-unfounded inference CLAUDE.md guardrail #2 exists to prevent for citations, and the same principle
+unfounded inference the citation-grounding rule exists to prevent, and the same principle
 applies here: the user states the space, the tool doesn't guess it.
 """
 

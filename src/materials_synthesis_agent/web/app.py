@@ -1,9 +1,8 @@
-"""Minimal local web UI -- v0.2 (ROADMAP.md), an alternative to the CLI for one local project.
+"""Minimal local web UI -- an alternative to the CLI for one local project.
 
-Still no auth, still single-user, still fully local (CLAUDE.md guardrail: nothing in this package
-should assume a hosted context). Server-rendered HTML, no build step, no JS framework -- this is
-meant to be a thin, honest view over the same Store/optimizer/literature modules the CLI uses, not
-a second implementation of the product logic.
+Still no auth, still single-user, still fully local. Server-rendered HTML, no build step, no JS
+framework -- a thin view over the same storage/optimizer/literature modules the CLI uses, not a
+second implementation of the product logic.
 """
 
 from __future__ import annotations

@@ -1,10 +1,9 @@
-"""Local SQLite persistence. Zero setup by design (CLAUDE.md convention): a fresh clone should
+"""Local SQLite persistence. Zero setup by design: a fresh clone should
 work the moment someone runs `materials-agent init`, without standing up a database server.
 
 Schema objects are stored as JSON blobs keyed by id, mirroring the Pydantic models in
 `schema.models` -- this module has no independent notion of "what a protocol is," it just persists
-and retrieves the schema objects verbatim. That keeps the schema module the single source of truth,
-matching how `materials-copilot`'s Postgres layer is documented to consume the exact same models.
+and retrieves the schema objects verbatim. That keeps the schema module the single source of truth for what each object is.
 """
 
 from __future__ import annotations
@@ -200,8 +199,7 @@ class Store:
         return trajectory
 
     # -- usage / cost governance ------------------------------------------
-    # Mirrors materials-copilot's usage_events table (DATA_MODEL.md) so the same idempotency
-    # discipline applies locally, not just in the hosted product.
+    # Idempotent usage tracking, so a retried job can't double-charge API usage.
 
     def record_usage(
         self, kind: str, estimated_cost: float, idempotency_key: str, actual_cost: Optional[float] = None

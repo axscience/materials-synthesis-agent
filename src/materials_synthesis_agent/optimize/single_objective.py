@@ -1,6 +1,6 @@
 """Single-objective Bayesian optimization over a mixed continuous/categorical parameter space.
 
-This is the v0.1 optimizer (CLAUDE.md guardrail #5): a real Gaussian-process model (BoTorch
+A real Gaussian-process model (BoTorch
 MixedSingleTaskGP), not a heuristic. Real experimental observations carry their own measurement
 noise (from Metric.uncertainty); a metric logged without uncertainty is not silently trusted -- it
 gets a conservative, inflated noise estimate so it influences the model less, mirroring the
@@ -10,7 +10,7 @@ Literature protocols "seed the prior" by biasing where the acquisition-function 
 its search (via `batch_initial_conditions`), not by being injected as fabricated training
 observations -- we don't have a validated outcome for them under this project's conditions, so
 treating a literature-reported yield as this project's GP training data would misrepresent its
-provenance. See ARCHITECTURE.md.
+provenance.
 """
 
 from __future__ import annotations

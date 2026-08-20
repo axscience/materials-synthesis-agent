@@ -1,15 +1,14 @@
 """Citation-grounded protocol extraction via forced tool-use, provider-agnostic (Anthropic,
 OpenAI, xAI/Grok, or Moonshot/Kimi -- see `llm/`).
 
-CLAUDE.md guardrail #2: every extracted field is either citation-grounded (an `excerpt` from the
+Core invariant: every extracted field is either citation-grounded (an `excerpt` from the
 source text) or explicitly flagged `inferred=True`. The tool schema below makes that structural,
 not just a prompt instruction -- the model must supply one or the other for every field it reports,
 and `_field_value` refuses to build a FieldValue that has neither (matching the same validator on
 `schema.models.FieldValue`).
 
-Every call that costs money supports `dry_run=True` (CLAUDE.md convention) -- required because
-materials-copilot shows this estimate to hosted users before running the job, and it's good
-practice for local CLI use too.
+Every call that costs money supports `dry_run=True`, so a cost estimate can be shown and
+confirmed before anything is spent.
 """
 
 from __future__ import annotations
