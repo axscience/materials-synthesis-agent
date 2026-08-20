@@ -9,3 +9,9 @@ dist/
 build/
 *.db
 .env
+
+# Internal development docs -- kept locally, not part of the public package
+CLAUDE.md
+ARCHITECTURE.md
+ROADMAP.md
+CONTRIBUTING.md
