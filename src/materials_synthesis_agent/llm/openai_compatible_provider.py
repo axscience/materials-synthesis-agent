@@ -41,3 +41,19 @@ class OpenAICompatibleProvider:
         )
         tool_call = response.choices[0].message.tool_calls[0]
         return json.loads(tool_call.function.arguments)
+
+    def chat(
+        self,
+        messages: list[dict],
+        system: Optional[str] = None,
+        max_tokens: int = 4000,
+    ) -> str:
+        msgs = list(messages)
+        if system:
+            msgs = [{"role": "system", "content": system}] + msgs
+        response = self._client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens,
+            messages=msgs,
+        )
+        return response.choices[0].message.content or ""

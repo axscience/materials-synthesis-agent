@@ -35,7 +35,7 @@ def test_build_query_prefers_name_when_set():
         metric_measurement_method="PXRD",
     )
     query = build_query(target)
-    assert query == "COF-5 synthesis"
+    assert query == "COF-5 covalent organic framework synthesis"
 
 
 def test_build_query_falls_back_to_functional_groups_when_no_name():
@@ -47,7 +47,7 @@ def test_build_query_falls_back_to_functional_groups_when_no_name():
         metric_measurement_method="PXRD",
     )
     query = build_query(target)
-    assert query == "imine condensation imine synthesis CO2 capture"
+    assert query == "imine condensation covalent organic framework synthesis imine CO2 capture"
 
 
 def _target():

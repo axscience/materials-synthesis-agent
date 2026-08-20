@@ -1,9 +1,13 @@
 """Provider-agnostic LLM client interface.
 
-This project needs exactly one LLM capability: force a single named tool call and get back its
-parsed arguments (used for citation-grounded protocol extraction). Keeping the interface this
-narrow is what makes supporting four providers tractable instead of four bespoke integrations --
-every provider adapter implements `call_tool` and nothing else.
+Two capabilities:
+  1. `call_tool` — force a single named tool call and get back its parsed arguments (used for
+     citation-grounded protocol extraction and NL parsing).
+  2. `chat` — free-form conversational reasoning (used by the expert agent for planning,
+     advising, and orchestration).
+
+Keeping the interface this narrow is what makes supporting four providers tractable instead of
+four bespoke integrations.
 
 Real, current (as of this writing) provider details below -- base URLs and default models were
 looked up directly, not guessed. Model names in this space change often; override via `configure`
@@ -52,6 +56,17 @@ class LLMClient(Protocol):
         """Force the model to call `tool_name` and return its parsed arguments as a dict.
         `tool_schema` is a plain JSON Schema object (the same shape for every provider -- each
         adapter wraps it in its own envelope internally)."""
+        ...
+
+    def chat(
+        self,
+        messages: list[dict],
+        system: str | None = None,
+        max_tokens: int = 4000,
+    ) -> str:
+        """Free-form conversational exchange. `messages` is a list of
+        {"role": "user"|"assistant", "content": "..."} dicts. Returns the assistant's
+        text response. Used by the expert agent for reasoning, planning, and advising."""
         ...
 
 

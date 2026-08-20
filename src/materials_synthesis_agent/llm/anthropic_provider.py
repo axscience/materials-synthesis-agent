@@ -27,3 +27,19 @@ class AnthropicProvider:
         )
         tool_use = next(block for block in response.content if block.type == "tool_use")
         return tool_use.input
+
+    def chat(
+        self,
+        messages: list[dict],
+        system: Optional[str] = None,
+        max_tokens: int = 4000,
+    ) -> str:
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        if system:
+            kwargs["system"] = system
+        response = self._client.messages.create(**kwargs)
+        return "".join(block.text for block in response.content if block.type == "text")

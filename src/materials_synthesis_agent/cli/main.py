@@ -260,6 +260,66 @@ def ask(
 
 
 @app.command()
+def consult(
+    message: str = typer.Argument(
+        ..., help="Your question or request — e.g. \"How should I optimize COF-LZU1 crystallinity?\" or \"What solvent system would work best for a boronate ester COF?\""
+    ),
+    project: str = typer.Option(None, "--project", help="Load an existing project's target and protocols as context."),
+    plan: bool = typer.Option(False, "--plan", help="Ask the expert to create a step-by-step plan instead of just advising."),
+):
+    """Consult the Materials Science Expert — an LLM-powered advisor that reasons about synthesis
+    strategy, evaluates feasibility, interprets results, and orchestrates the literature agent and
+    optimizer. Always presents plans for your confirmation before executing actions."""
+    if get_configured_provider() is None:
+        console.print(
+            "[red]No LLM provider configured.[/red] Run [bold]materials-agent configure[/bold] first, "
+            "or set one of: " + ", ".join(c.env_var for c in PROVIDERS.values())
+        )
+        raise typer.Exit(1)
+
+    from materials_synthesis_agent.cli.llm_config import get_configured_llm_client
+    from materials_synthesis_agent.expert import ExpertAgent
+
+    client = get_configured_llm_client()
+    agent = ExpertAgent(client)
+
+    if project:
+        try:
+            store = Store(proj.db_path(project))
+            target = _load_target(project, store)
+            agent.set_target(target)
+            protocols = store.get_protocol_candidates(target.id)
+            if protocols:
+                agent.add_protocols(protocols)
+            store.close()
+            console.print(f"[dim]Loaded project '{project}': {target.name or 'unnamed'}, {len(protocols)} protocols[/dim]")
+        except Exception as exc:
+            console.print(f"[yellow]Couldn't load project '{project}': {exc}. Proceeding without project context.[/yellow]")
+
+    from materials_synthesis_agent.llm.pricing import estimate_cost_usd
+    estimated = estimate_cost_usd(message, 4000)
+    console.print(f"[dim]Estimated cost for this consultation: ${estimated:.4f}[/dim]")
+
+    if plan:
+        response = agent.create_plan(goal=message, user_message=message)
+    else:
+        response = agent.respond(message)
+
+    console.print()
+    console.print(response)
+
+    # Interactive follow-up loop
+    while True:
+        follow_up = typer.prompt("\nFollow-up (or 'done' to exit)", default="done", show_default=False)
+        if follow_up.strip().lower() in ("done", "exit", "quit", "q"):
+            break
+
+        response = agent.respond(follow_up)
+        console.print()
+        console.print(response)
+
+
+@app.command()
 def configure():
     """Choose an LLM provider and enter your API key -- one-time setup, shared across every local
     project. The key is stored locally at ~/.materials-agent/config.json (readable only by you)

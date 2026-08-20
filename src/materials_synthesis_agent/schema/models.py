@@ -148,14 +148,31 @@ class ProtocolCandidate(BaseModel):
     source: ProtocolSource
 
     building_blocks: dict[str, FieldValue] = Field(
-        default_factory=dict, description="name -> SMILES, with provenance"
+        default_factory=dict, description="monomer abbreviation -> SMILES, with provenance"
+    )
+    monomer_roles: dict[str, FieldValue] = Field(
+        default_factory=dict, description="monomer abbreviation -> structural role (node/linker/core)"
     )
     stoichiometry: dict[str, FieldValue] = Field(default_factory=dict)
+    synthesis_method: Optional[FieldValue] = None
     solvent: Optional[FieldValue] = None
+    catalyst: Optional[FieldValue] = None
     modulator: Optional[FieldValue] = None
     temperature_c: Optional[FieldValue] = None
     time_hours: Optional[FieldValue] = None
     concentration_molar: Optional[FieldValue] = None
+    atmosphere: Optional[FieldValue] = None
+    activation_method: Optional[FieldValue] = None
+    purification: Optional[FieldValue] = None
+    yield_percent: Optional[FieldValue] = None
+    characterization_notes: Optional[FieldValue] = None
+
+    measured_outcomes: list[MeasuredOutcome] = Field(
+        default_factory=list,
+        description="Quantitative results reported in the same paper as the protocol — "
+        "PXRD crystallinity, BET surface area, yield, etc. Real measurements that can "
+        "seed the GP as observations.",
+    )
 
     feasibility_flags: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now)
@@ -163,10 +180,12 @@ class ProtocolCandidate(BaseModel):
     def all_fields(self) -> list[FieldValue]:
         """Every FieldValue on this candidate, for grounding audits and UI rendering."""
         out: list[FieldValue] = list(self.building_blocks.values()) + list(
-            self.stoichiometry.values()
-        )
-        for f in (self.solvent, self.modulator, self.temperature_c, self.time_hours,
-                  self.concentration_molar):
+            self.monomer_roles.values()
+        ) + list(self.stoichiometry.values())
+        for f in (self.synthesis_method, self.solvent, self.catalyst, self.modulator,
+                  self.temperature_c, self.time_hours, self.concentration_molar,
+                  self.atmosphere, self.activation_method, self.purification,
+                  self.yield_percent, self.characterization_notes):
             if f is not None:
                 out.append(f)
         return out
@@ -205,6 +224,24 @@ class LinkageClassification(BaseModel):
     linkage_chemistry: str
     confidence: float
     evidence: list[str] = Field(default_factory=list)
+
+
+class MeasuredOutcome(BaseModel):
+    """A quantitative result reported in a paper alongside its synthesis protocol — e.g. a PXRD
+    crystallinity ratio, a BET surface area, or an isolated yield. These are real, published
+    measurements that can seed the GP as genuine observations (with appropriate noise), unlike
+    LiteratureAnchors which only bias the search start.
+
+    `uncertainty` is often not reported in papers; when absent, the optimizer assigns a conservative
+    default noise to downweight the observation rather than trusting it blindly."""
+
+    metric_name: str = Field(description="e.g. 'crystallinity', 'BET_surface_area', 'yield'")
+    value: float
+    unit: str = Field(description="e.g. 'm²/g', '%', 'ratio'")
+    uncertainty: Optional[float] = None
+    measurement_method: str = Field(description="e.g. 'PXRD peak area ratio', 'N₂ adsorption at 77 K'")
+    citation: Optional[Citation] = None
+    inferred: bool = False
 
 
 class Metric(BaseModel):

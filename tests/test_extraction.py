@@ -56,12 +56,23 @@ def test_extract_protocol_grounds_cited_fields_and_flags_inferred():
             "TAPB": {"value": "SMILES1", "excerpt": "TAPB was used as the amine node", "inferred": False},
             "PDA": {"value": "SMILES2", "excerpt": None, "inferred": True},
         },
+        "monomer_roles": {
+            "TAPB": {"value": "node", "excerpt": "TAPB was used as the amine node", "inferred": False},
+            "PDA": {"value": "linker", "excerpt": None, "inferred": True},
+        },
         "stoichiometry": {},
+        "synthesis_method": {"value": "solvothermal", "excerpt": "sealed Pyrex tube at 120 C for 72 h", "inferred": False},
         "solvent": {"value": "dioxane/mesitylene 1:1", "excerpt": "dioxane and mesitylene (1:1 v/v)", "inferred": False},
+        "catalyst": None,
         "modulator": None,
         "temperature_c": {"value": "120", "excerpt": "heated at 120 C", "inferred": False},
         "time_hours": None,
         "concentration_molar": None,
+        "atmosphere": {"value": "N2", "excerpt": "under nitrogen atmosphere", "inferred": False},
+        "activation_method": {"value": "Soxhlet extraction with THF, then vacuum drying at 120 C", "excerpt": "Soxhlet-extracted with THF for 24 h, then dried under vacuum at 120 C", "inferred": False},
+        "purification": None,
+        "yield_percent": {"value": "85", "excerpt": "isolated in 85% yield", "inferred": False},
+        "characterization_notes": None,
     }
     candidate = extract_protocol(target, paper, client=FakeClient(tool_input))
 
@@ -70,7 +81,14 @@ def test_extract_protocol_grounds_cited_fields_and_flags_inferred():
     assert candidate.building_blocks["TAPB"].inferred is False
     assert candidate.building_blocks["PDA"].citation is None
     assert candidate.building_blocks["PDA"].inferred is True
+    assert candidate.monomer_roles["TAPB"].value == "node"
+    assert candidate.monomer_roles["PDA"].inferred is True
+    assert candidate.synthesis_method.value == "solvothermal"
     assert candidate.solvent.citation.excerpt == "dioxane and mesitylene (1:1 v/v)"
+    assert candidate.atmosphere.value == "N2"
+    assert candidate.activation_method.citation is not None
+    assert candidate.yield_percent.value == "85"
+    assert candidate.catalyst is None
     assert candidate.modulator is None
     assert 0 < candidate.citation_coverage() <= 1
 
@@ -95,7 +113,7 @@ def test_full_text_excerpt_replaces_the_abstract_in_the_prompt():
     client = FakeClient({"found_protocol": False})
     extract_protocol(target, paper, client=client, full_text_excerpt="Synthesized using 5 mmol reagent A at 120 C.")
     prompt = client.last_call_kwargs["prompt"]
-    assert "Experimental section excerpt" in prompt
+    assert "EXPERIMENTAL SECTION EXCERPT" in prompt
     assert "Synthesized using 5 mmol reagent A" in prompt
     assert paper.abstract not in prompt
 
@@ -105,7 +123,7 @@ def test_no_full_text_excerpt_still_uses_the_abstract():
     client = FakeClient({"found_protocol": False})
     extract_protocol(target, paper, client=client)
     prompt = client.last_call_kwargs["prompt"]
-    assert "Abstract/text" in prompt
+    assert "ABSTRACT" in prompt
     assert paper.abstract in prompt
 
 

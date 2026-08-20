@@ -14,13 +14,22 @@ from materials_synthesis_agent.schema import ProtocolCandidate, Target
 
 
 def build_query(target: Target) -> str:
-    """A name-targeted search ("COF-5 synthesis") finds the specific paper(s) that made that exact
-    material far more reliably than a functional-group/linkage query would, so `target.name` wins
-    whenever it's set -- the functional-group query is a fallback for hypothesized COFs that don't
-    have one yet, not the default path once a name is known."""
+    """A name-targeted search ("COF-5 covalent organic framework synthesis") finds the specific
+    paper(s) that made that exact material far more reliably than a functional-group/linkage query
+    would, so `target.name` wins whenever it's set. Adding "covalent organic framework" to named
+    queries disambiguates common abbreviations (e.g. "COF-1" alone matches unrelated papers).
+
+    The fallback query for unnamed/hypothesized COFs combines the linkage chemistry with "covalent
+    organic framework synthesis" and any functional groups, producing queries like
+    "imine covalent organic framework synthesis TAPB PDA" that hit the real literature."""
     if target.name:
-        return f"{target.name} synthesis"
-    return f"{target.linkage_chemistry} {' '.join(target.functional_groups)} synthesis {target.application}"
+        return f"{target.name} covalent organic framework synthesis"
+    parts = [target.linkage_chemistry, "covalent organic framework synthesis"]
+    if target.functional_groups:
+        parts.extend(target.functional_groups)
+    if target.application and target.application.lower() not in ("general", ""):
+        parts.append(target.application)
+    return " ".join(parts)
 
 
 def _resolve_excerpt(paper: Paper, use_full_text: bool, unpaywall_email: Optional[str]) -> Optional[str]:
