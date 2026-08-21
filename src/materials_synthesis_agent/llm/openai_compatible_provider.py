@@ -20,14 +20,16 @@ import openai
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-5.6", base_url: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-5.6", base_url: Optional[str] = None,
+                 extra_body: Optional[dict] = None):
         self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self._extra_body = extra_body or {}
 
     def call_tool(
-        self, prompt: str, tool_name: str, tool_description: str, tool_schema: dict, max_tokens: int = 2000
+        self, prompt: str, tool_name: str, tool_description: str, tool_schema: dict, max_tokens: int = 4000
     ) -> dict:
-        response = self._client.chat.completions.create(
+        kwargs: dict = dict(
             model=self.model,
             max_tokens=max_tokens,
             tools=[
@@ -39,8 +41,14 @@ class OpenAICompatibleProvider:
             tool_choice={"type": "function", "function": {"name": tool_name}},
             messages=[{"role": "user", "content": prompt}],
         )
-        tool_call = response.choices[0].message.tool_calls[0]
-        return json.loads(tool_call.function.arguments)
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
+        response = self._client.chat.completions.create(**kwargs)
+        msg = response.choices[0].message
+        if not msg.tool_calls:
+            reason = response.choices[0].finish_reason
+            raise ValueError(f"Model did not return a tool call (finish_reason={reason})")
+        return json.loads(msg.tool_calls[0].function.arguments)
 
     def chat(
         self,
@@ -55,5 +63,6 @@ class OpenAICompatibleProvider:
             model=self.model,
             max_tokens=max_tokens,
             messages=msgs,
+            **({"extra_body": self._extra_body} if self._extra_body else {}),
         )
         return response.choices[0].message.content or ""

@@ -46,6 +46,14 @@ PROVIDERS: dict[str, ProviderConfig] = {
         key="kimi", display_name="Moonshot AI (Kimi)", env_var="KIMI_API_KEY",
         base_url="https://api.moonshot.ai/v1", default_model="kimi-k3",
     ),
+    "minimax": ProviderConfig(
+        key="minimax", display_name="MiniMax", env_var="MINIMAX_API_KEY",
+        base_url="https://api.minimax.io/anthropic", default_model="MiniMax-M3",
+    ),
+    "deepseek": ProviderConfig(
+        key="deepseek", display_name="DeepSeek (via DashScope)", env_var="DASHSCOPE_API_KEY",
+        base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1", default_model="deepseek-v4-pro-0813",
+    ),
 }
 
 
@@ -78,10 +86,10 @@ def build_client(provider_key: str, api_key: str, model: str | None = None) -> L
     config = PROVIDERS[provider_key]
     resolved_model = model or config.default_model
 
-    if provider_key == "anthropic":
+    if provider_key in ("anthropic", "minimax"):
         from materials_synthesis_agent.llm.anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(api_key=api_key, model=resolved_model)
+        return AnthropicProvider(api_key=api_key, model=resolved_model, base_url=config.base_url)
 
     from materials_synthesis_agent.llm.openai_compatible_provider import OpenAICompatibleProvider
 

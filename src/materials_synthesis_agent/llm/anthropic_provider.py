@@ -11,12 +11,15 @@ import anthropic
 
 
 class AnthropicProvider:
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-opus-4-5"):
-        self._client = anthropic.Anthropic(api_key=api_key)
+    def __init__(self, api_key: Optional[str] = None, model: str = "claude-opus-4-5", base_url: Optional[str] = None):
+        kwargs: dict = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = anthropic.Anthropic(**kwargs)
         self.model = model
 
     def call_tool(
-        self, prompt: str, tool_name: str, tool_description: str, tool_schema: dict, max_tokens: int = 2000
+        self, prompt: str, tool_name: str, tool_description: str, tool_schema: dict, max_tokens: int = 4000
     ) -> dict:
         response = self._client.messages.create(
             model=self.model,
@@ -25,7 +28,9 @@ class AnthropicProvider:
             tool_choice={"type": "tool", "name": tool_name},
             messages=[{"role": "user", "content": prompt}],
         )
-        tool_use = next(block for block in response.content if block.type == "tool_use")
+        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
+        if tool_use is None:
+            raise ValueError(f"Model did not return a tool_use block (stop_reason={response.stop_reason})")
         return tool_use.input
 
     def chat(

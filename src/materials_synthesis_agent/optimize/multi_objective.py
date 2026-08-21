@@ -25,7 +25,7 @@ from botorch.optim import optimize_acqf_mixed
 from botorch.utils.multi_objective import is_non_dominated
 from gpytorch.mlls import SumMarginalLogLikelihood
 
-from materials_synthesis_agent.optimize.single_objective import _DEFAULT_NOISE_STD_FOR_UNQUANTIFIED
+from materials_synthesis_agent.optimize.single_objective import _infer_noise_std
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParamValue
 
 
@@ -67,11 +67,14 @@ class MultiObjectiveOptimizer:
         train_x = self.space.encode_batch([o.params for o in observations])
         models = []
         for objective in self.objectives:
+            from materials_synthesis_agent.optimize.single_objective import Observation as _SObs
+            _proxy = [_SObs(params={}, value=o.values[objective.name]) for o in observations]
+            default_noise = _infer_noise_std(_proxy)
             y = torch.tensor(
                 [[self._sign(objective) * o.values[objective.name]] for o in observations], dtype=torch.double
             )
             yvar = torch.tensor(
-                [[(o.uncertainties.get(objective.name) or _DEFAULT_NOISE_STD_FOR_UNQUANTIFIED) ** 2]
+                [[(o.uncertainties.get(objective.name) or default_noise) ** 2]
                  for o in observations],
                 dtype=torch.double,
             )

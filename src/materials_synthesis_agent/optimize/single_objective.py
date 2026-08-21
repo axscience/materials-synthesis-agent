@@ -29,10 +29,11 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParamValue
 
-# A metric logged with no stated uncertainty still needs *some* noise value for the GP -- this is
-# a conservative placeholder (relative to typical result spread) that downweights, not excludes,
-# an unquantified observation. It is not a claim about the true measurement error.
-_DEFAULT_NOISE_STD_FOR_UNQUANTIFIED = 0.25
+# Floor for inferred noise std when no measurement uncertainty is stated.  The actual default
+# is computed adaptively from the observed response spread (see _infer_noise_std); this floor
+# prevents a degenerate near-zero noise estimate when all observations have similar values.
+_NOISE_STD_FLOOR = 0.01
+_NOISE_STD_FRACTION = 0.15  # fraction of observed response std used as default noise
 
 
 @dataclass
@@ -63,6 +64,22 @@ class Suggestion:
     rationale: str
 
 
+def _infer_noise_std(observations: list[Observation]) -> float:
+    """Adaptive noise estimate for observations without stated uncertainty.
+
+    Uses a fraction of the observed response spread so the GP can still learn
+    structure from the data.  A fixed constant (the previous 0.25) drowns the
+    signal when the response range is narrow — the GP collapses to a constant
+    mean with zero outputscale and EI becomes identically zero everywhere.
+    """
+    values = [o.value for o in observations]
+    if len(values) < 2:
+        return _NOISE_STD_FLOOR
+    spread = max(values) - min(values)
+    std_est = spread * _NOISE_STD_FRACTION
+    return max(_NOISE_STD_FLOOR, std_est)
+
+
 class SingleObjectiveOptimizer:
     def __init__(self, space: ParameterSpace, maximize: bool = True):
         self.space = space
@@ -71,8 +88,9 @@ class SingleObjectiveOptimizer:
     def _build_model(self, observations: list[Observation]):
         train_x = self.space.encode_batch([o.params for o in observations])
         train_y = torch.tensor([[o.value] for o in observations], dtype=torch.double)
+        default_noise = _infer_noise_std(observations)
         train_yvar = torch.tensor(
-            [[(o.uncertainty**2) if o.uncertainty is not None else _DEFAULT_NOISE_STD_FOR_UNQUANTIFIED**2]
+            [[(o.uncertainty**2) if o.uncertainty is not None else default_noise**2]
              for o in observations],
             dtype=torch.double,
         )

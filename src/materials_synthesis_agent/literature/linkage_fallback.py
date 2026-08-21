@@ -90,6 +90,17 @@ def build_search_tiers(target: Target) -> list[SearchTier]:
             beyond_target_linkage=False,
         ))
 
+    # tier 0.5: search by monomer names / functional groups -- catches papers that don't
+    # mention the COF's canonical name but do describe synthesis with the same building blocks.
+    if target.functional_groups and len(target.functional_groups) >= 2:
+        monomer_query = " ".join(target.functional_groups) + " covalent organic framework synthesis"
+        tiers.append(SearchTier(
+            label=f"COFs with same monomers ({', '.join(target.functional_groups[:3])})",
+            query=monomer_query,
+            linkage=base,
+            beyond_target_linkage=False,
+        ))
+
     # tier 1: same linkage chemistry.
     if base:
         tiers.append(SearchTier(

@@ -60,17 +60,13 @@ _SECTION_HEADINGS_LOOSE = [
 def fetch_pdf_text(url: str, timeout_s: float = 30.0) -> Optional[str]:
     """Downloads a PDF and extracts its text. Returns None on any failure (network error, not
     actually a PDF, encrypted/unparseable PDF) -- never raises, since a full-text fetch failing is
-    a normal fallback-to-abstract case, not something that should crash suggest-protocols."""
-    # Confirmed directly against real publisher hosts: some (RSC) return a Cloudflare bot-challenge
-    # page (403, text/html) to a request with no User-Agent, even for a genuinely open-access PDF;
-    # a plain browser-like UA is enough to get the real PDF from those that don't hard-block
-    # scripted requests outright (Nature/Springer worked; RSC still 403s regardless -- that's a
-    # real, unresolved gap, not a bug in this function).
-    headers = {"Accept": "application/pdf", "User-Agent": "Mozilla/5.0 (compatible; materials-synthesis-agent/0.3)"}
+    a normal fallback-to-abstract case, not something that should crash suggest-protocols.
+    Uses cloudscraper to bypass Cloudflare bot challenges on publisher sites."""
     try:
-        resp = requests.get(url, timeout=timeout_s, headers=headers)
+        scraper = _get_cloudscraper()
+        resp = scraper.get(url, timeout=timeout_s)
         resp.raise_for_status()
-    except requests.RequestException:
+    except Exception:
         return None
 
     if "pdf" not in resp.headers.get("content-type", "").lower():
@@ -116,9 +112,10 @@ def extract_relevant_section(full_text: str, max_chars: int = 8000) -> str:
         return full_text[match.start() : match.start() + max_chars].strip()
 
     for pattern in _SECTION_HEADINGS_LOOSE:
-        match = re.search(pattern, full_text, re.IGNORECASE)
-        if match:
-            return full_text[match.start() : match.start() + max_chars].strip()
+        # Skip matches in the first 200 chars — those are almost always the paper title
+        for match in re.finditer(pattern, full_text, re.IGNORECASE):
+            if match.start() > 200:
+                return full_text[match.start() : match.start() + max_chars].strip()
     return full_text[:max_chars].strip()
 
 
@@ -152,11 +149,11 @@ def resolve_si_pdf_urls(doi_or_landing_url: str, timeout_s: float = 30.0) -> lis
     else:
         return []
 
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; materials-synthesis-agent/0.3)"}
     try:
-        resp = requests.get(landing, timeout=timeout_s, headers=headers)
+        scraper = _get_cloudscraper()
+        resp = scraper.get(landing, timeout=timeout_s)
         resp.raise_for_status()
-    except requests.RequestException:
+    except Exception:
         return []
     if "html" not in resp.headers.get("content-type", "").lower():
         return []
@@ -191,8 +188,85 @@ def get_supplementary_excerpt(paper, max_chars: int = 8000) -> Optional[str]:
     return None
 
 
+def _get_cloudscraper():
+    """Lazy-init a cloudscraper session for Cloudflare-protected sites."""
+    import cloudscraper
+    return cloudscraper.create_scraper()
+
+
+def _resolve_alternative_pdf(source_id: Optional[str]) -> Optional[str]:
+    """Try to find a PDF via Unpaywall repository copies or Crossref preprint relations.
+    Works around Cloudflare-blocked publisher and ChemRxiv sites by finding repository
+    mirrors (institutional repositories, preprint servers) that serve PDFs without bot
+    challenges."""
+    import os as _os
+    if not source_id or "/" not in source_id:
+        return None
+
+    email = _os.environ.get("UNPAYWALL_EMAIL") or _os.environ.get("OPENALEX_MAILTO")
+    if not email:
+        email = None
+
+    # 1. Unpaywall: find repository copies (institutional repos bypass Cloudflare)
+    if email:
+        try:
+            resp = requests.get(
+                f"https://api.unpaywall.org/v2/{source_id}",
+                params={"email": email},
+                timeout=10,
+            )
+            if resp.ok:
+                data = resp.json()
+                for loc in data.get("oa_locations", []):
+                    pdf_url = loc.get("url_for_pdf")
+                    host = loc.get("host_type", "")
+                    if pdf_url and host == "repository":
+                        return pdf_url
+                best = data.get("best_oa_location") or {}
+                if best.get("url_for_pdf"):
+                    return best["url_for_pdf"]
+        except Exception:
+            pass
+
+    # 2. Crossref: check for preprint relation, then resolve that preprint's PDF
+    try:
+        resp = requests.get(
+            f"https://api.crossref.org/works/{source_id}",
+            timeout=10,
+            headers={"User-Agent": "materials-synthesis-agent/0.3 (mailto:materials-synthesis-agent@example.com)"},
+        )
+        if resp.ok:
+            relations = resp.json().get("message", {}).get("relation", {})
+            for rel_type in ("has-preprint", "is-preprint-of"):
+                for rel in relations.get(rel_type, []):
+                    preprint_doi = rel.get("id", "")
+                    if preprint_doi and "chemrxiv" in preprint_doi.lower():
+                        preprint_pdf = _resolve_alternative_pdf(preprint_doi)
+                        if preprint_pdf:
+                            return preprint_pdf
+    except Exception:
+        pass
+
+    return None
+
+
+def _candidate_pdf_urls(paper, unpaywall_email: Optional[str] = None):
+    """Yield candidate PDF URLs in priority order, trying each source."""
+    from materials_synthesis_agent.literature.retrieval import resolve_oa_pdf_url_via_unpaywall
+
+    if paper.oa_pdf_url:
+        yield paper.oa_pdf_url
+    if paper.source_id and "/" in paper.source_id:
+        url = resolve_oa_pdf_url_via_unpaywall(paper.source_id, email=unpaywall_email)
+        if url and url != paper.oa_pdf_url:
+            yield url
+        alt = _resolve_alternative_pdf(paper.source_id)
+        if alt and alt != url and alt != paper.oa_pdf_url:
+            yield alt
+
+
 def get_full_text_excerpt(
-    paper, max_chars: int = 8000, unpaywall_email: Optional[str] = None, include_supplementary: bool = True
+    paper, max_chars: int = 40000, unpaywall_email: Optional[str] = None, include_supplementary: bool = True
 ) -> Optional[str]:
     """End-to-end synthesis-text resolution for one paper. Tries, in order:
 
@@ -208,18 +282,25 @@ def get_full_text_excerpt(
 
     parts: list[str] = []
 
+    section_chars = max_chars // 2  # each part gets half the budget
+
     if include_supplementary:
-        si = get_supplementary_excerpt(paper, max_chars=max_chars)
+        si = get_supplementary_excerpt(paper, max_chars=section_chars)
         if si:
             parts.append(f"--- SUPPLEMENTARY INFORMATION ---\n{si}")
 
-    pdf_url = paper.oa_pdf_url
-    if not pdf_url and paper.source_id and "/" in paper.source_id:  # a DOI-shaped source_id
-        pdf_url = resolve_oa_pdf_url_via_unpaywall(paper.source_id, email=unpaywall_email)
-    if pdf_url:
+    full_text = None
+    for pdf_url in _candidate_pdf_urls(paper, unpaywall_email):
         full_text = fetch_pdf_text(pdf_url)
         if full_text:
-            parts.append(f"--- MAIN TEXT (Experimental/Methods) ---\n{extract_relevant_section(full_text, max_chars=max_chars)}")
+            break
+    if full_text:
+        # Short papers: send the whole text; long papers: extract the experimental section
+        remaining = max_chars - sum(len(p) for p in parts)
+        if len(full_text) <= remaining:
+            parts.append(f"--- MAIN TEXT (full) ---\n{full_text}")
+        else:
+            parts.append(f"--- MAIN TEXT (Experimental/Methods) ---\n{extract_relevant_section(full_text, max_chars=remaining)}")
 
     if not parts:
         return None

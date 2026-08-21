@@ -5,10 +5,17 @@ Search proceeds hierarchically by linkage chemistry (see literature/linkage_fall
 COF first, then any COF with the same linkage, then -- only with the user's go-ahead -- COFs with a
 related-but-different linkage. Candidates found beyond the target's own linkage are tagged with a
 provenance note so a weaker-prior protocol is never silently treated as an exact match.
+
+Within-linkage tiers (Tier 0 / 0.5 / 1) always run -- even when an earlier tier already found enough
+protocols, because different papers contribute different experiments and the GP benefits from more
+distinct data points. After all within-linkage tiers are searched, protocols are deduplicated by
+building-block fingerprint while preserving every experiment from every merged source, so the
+optimizer sees the full literature data landscape without redundant protocol entries.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional
 
 from materials_synthesis_agent.literature.extraction import extract_protocol
@@ -19,7 +26,9 @@ from materials_synthesis_agent.literature.linkage_fallback import (
 )
 from materials_synthesis_agent.literature.retrieval import Paper, search
 from materials_synthesis_agent.llm import LLMClient
-from materials_synthesis_agent.schema import ProtocolCandidate, Target
+from materials_synthesis_agent.schema import LiteratureExperiment, MeasuredOutcome, ProtocolCandidate, Target
+
+logger = logging.getLogger(__name__)
 
 
 def build_query(target: Target) -> str:
@@ -40,7 +49,7 @@ def estimate_generation_cost(
     target: Target,
     papers: list[Paper],
     model: Optional[str] = None,
-    use_full_text: bool = False,
+    use_full_text: bool = True,
     unpaywall_email: Optional[str] = None,
 ) -> float:
     """`use_full_text=True` actually resolves and fetches each paper's OA full text / SI here (no $
@@ -86,45 +95,134 @@ def _extract_tier(
     return out
 
 
+def _protocol_fingerprint(candidate: ProtocolCandidate) -> str:
+    """Group key for deduplication: same building blocks = same material family.
+    Within a family, coarse-bucket the temperature to separate genuinely different conditions.
+    Protocols from different linkage chemistries (cross-linkage search results) are never merged,
+    even if they happen to share conditions — they represent distinct material systems."""
+    bb_key = tuple(sorted(candidate.building_blocks.keys()))
+    solvent = (candidate.solvent.value if candidate.solvent else "").lower().strip()[:30]
+    temp_bucket = ""
+    if candidate.temperature_c:
+        try:
+            t = float(candidate.temperature_c.value.split()[0].rstrip("°CcMm"))
+            temp_bucket = str(round(t / 20) * 20)
+        except (ValueError, IndexError):
+            temp_bucket = candidate.temperature_c.value[:10]
+    prov = candidate.provenance_note or ""
+    return f"{bb_key}|{solvent}|{temp_bucket}|{prov}"
+
+
+def deduplicate_protocols(
+    candidates: list[ProtocolCandidate],
+) -> list[ProtocolCandidate]:
+    """Collapse protocols with the same building blocks and similar conditions into one
+    representative per group. The protocol with the highest citation coverage (and most
+    experiments) survives; experiments and measured outcomes from all members of the group
+    are merged onto the survivor, so no data point is lost for the GP.
+
+    This is the core of the "search broadly, dedup narrowly" strategy: the search casts a wide
+    net across tiers, and this function narrows to unique condition families while preserving
+    every (conditions -> outcome) data point the literature provides."""
+    if not candidates:
+        return []
+
+    groups: dict[str, list[ProtocolCandidate]] = {}
+    for c in candidates:
+        key = _protocol_fingerprint(c)
+        groups.setdefault(key, []).append(c)
+
+    deduplicated: list[ProtocolCandidate] = []
+    for key, group in groups.items():
+        group.sort(key=lambda c: (len(c.literature_experiments), c.citation_coverage()), reverse=True)
+        winner = group[0]
+
+        if len(group) > 1:
+            seen_labels = {exp.label for exp in winner.literature_experiments}
+            seen_outcomes = {(o.metric_name, o.value) for o in winner.measured_outcomes}
+
+            for donor in group[1:]:
+                for exp in donor.literature_experiments:
+                    if exp.label not in seen_labels:
+                        winner.literature_experiments.append(exp)
+                        seen_labels.add(exp.label)
+                for outcome in donor.measured_outcomes:
+                    outcome_key = (outcome.metric_name, outcome.value)
+                    if outcome_key not in seen_outcomes:
+                        winner.measured_outcomes.append(outcome)
+                        seen_outcomes.add(outcome_key)
+
+            winner.provenance_note = (
+                (winner.provenance_note or "") +
+                f" Merged from {len(group)} papers with similar conditions; "
+                f"all {len(winner.literature_experiments)} experiments preserved."
+            ).strip()
+            logger.info(
+                "Dedup group %s: merged %d protocols into 1 (%d experiments, %d outcomes)",
+                key[:40], len(group), len(winner.literature_experiments), len(winner.measured_outcomes),
+            )
+
+        deduplicated.append(winner)
+    return deduplicated
+
+
 def generate_protocols(
     target: Target,
-    n: int = 5,
+    n: int = 8,
     client: Optional[LLMClient] = None,
     model: Optional[str] = None,
     search_limit: Optional[int] = None,
-    use_full_text: bool = False,
+    use_full_text: bool = True,
     unpaywall_email: Optional[str] = None,
     confirm_expand: Optional[Callable[[list[str]], bool]] = None,
 ) -> list[ProtocolCandidate]:
-    """Search for papers relevant to `target` and return up to `n` extracted candidate protocols,
+    """Search for papers relevant to `target` and return up to `n` deduplicated candidate protocols,
     proceeding hierarchically by linkage chemistry (see module docstring).
 
-    Tiers within the target's own linkage (the exact COF, then same-linkage COFs) always run. Before
-    searching a *different* (related) linkage, `confirm_expand` is called once with the ordered list
-    of related linkages that would be tried; if it returns False (or is None), the search stops at
-    the target's own linkage rather than silently broadening. Anything found beyond the target's
-    linkage carries a provenance note marking it a weaker prior.
+    **Within-linkage tiers always run in full** -- Tier 0 (exact name), Tier 0.5 (monomer names),
+    and Tier 1 (same linkage) each get their own search quota, regardless of how many protocols
+    earlier tiers found. This ensures the GP benefits from the widest possible set of experiments
+    even when the exact-name search already turns up several protocols.
 
-    `use_full_text=True` tries each paper's real open-access full text and supplementary information
-    (see literature/fulltext.py), falling back to its abstract per paper when nothing is available.
+    Before searching a *different* (related) linkage, `confirm_expand` is called once with the
+    ordered list of related linkages that would be tried; if it returns False (or is None), the
+    search stops at the target's own linkage rather than silently broadening.
 
-    A paper that doesn't describe a usable protocol is skipped, not counted toward `n` -- callers
-    get real candidates, not padding. Returns fewer than `n` (possibly zero) when the literature,
-    within whatever linkage scope the user allowed, simply doesn't have more."""
-    limit = search_limit or n * 3
+    After extraction, protocols are deduplicated by building-block fingerprint (same material +
+    similar conditions = one protocol family), with all experiments from merged protocols preserved
+    on the surviving representative. This gives the optimizer maximum data points with minimum
+    redundancy in the protocol list presented to the user.
+
+    `use_full_text=True` (the default) tries each paper's real open-access full text and
+    supplementary information, falling back to its abstract per paper when nothing is available.
+
+    Returns fewer than `n` (possibly zero) when the literature doesn't have enough."""
+    per_tier_limit = search_limit or max(n, 8)
+    per_tier_extract = max(n, 6)
     tiers = build_search_tiers(target)
     candidates: list[ProtocolCandidate] = []
     asked_to_expand = False
 
     for tier in tiers:
-        if len(candidates) >= n:
-            break
-        if tier.beyond_target_linkage and not asked_to_expand:
-            asked_to_expand = True
-            alternatives = related_linkages(target)
-            if confirm_expand is None or not confirm_expand(alternatives):
-                break  # user declined (or no confirmer) -- stay within the target's own linkage
-        candidates.extend(
-            _extract_tier(target, tier, n - len(candidates), client, model, limit, use_full_text, unpaywall_email)
+        if tier.beyond_target_linkage:
+            if not asked_to_expand:
+                asked_to_expand = True
+                if len(candidates) >= n:
+                    break
+                alternatives = related_linkages(target)
+                if confirm_expand is None or not confirm_expand(alternatives):
+                    break
+        tier_results = _extract_tier(
+            target, tier, per_tier_extract, client, model, per_tier_limit, use_full_text, unpaywall_email,
         )
+        candidates.extend(tier_results)
+        logger.info("Tier '%s': extracted %d protocols (%d total so far)", tier.label, len(tier_results), len(candidates))
+
+    pre_dedup = len(candidates)
+    candidates = deduplicate_protocols(candidates)
+    logger.info("Deduplication: %d protocols -> %d unique families", pre_dedup, len(candidates))
+
+    total_experiments = sum(len(c.literature_experiments) for c in candidates)
+    logger.info("Total experiments across all protocols: %d (target for GP: 15-30)", total_experiments)
+
     return candidates[:n]

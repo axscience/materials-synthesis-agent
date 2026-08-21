@@ -404,7 +404,13 @@ Never report a value with no excerpt and inferred=false.
 If the paper does NOT describe an original synthesis protocol — it is a computational study, a \
 review, an application study using pre-made material, or it only cites another paper's procedure \
 without restating the conditions — set found_protocol=false and leave other fields empty. \
-Do not fill fields from general knowledge when the paper itself does not provide the information."""
+Do not fill fields from general knowledge when the paper itself does not provide the information.
+
+IMPORTANT: If the paper describes a general synthesis method applicable to the target's linkage \
+chemistry (e.g. a method for imine COFs that would work for the target), extract it even if the \
+target COF is not named specifically. The conditions (solvent, temperature, time, modulator) are \
+what matter for the optimizer — the specific COF name is secondary. Similarly, if the paper \
+synthesizes a closely related COF with the same linkage and monomers, extract that protocol."""
 
 
 def estimate_extraction_cost(
@@ -463,7 +469,7 @@ def extract_protocol(
         tool_name=EXTRACTION_TOOL_NAME,
         tool_description=EXTRACTION_TOOL_DESCRIPTION,
         tool_schema=EXTRACTION_TOOL_SCHEMA,
-        max_tokens=2000,
+        max_tokens=8000,
     )
 
     if not data.get("found_protocol", False):
