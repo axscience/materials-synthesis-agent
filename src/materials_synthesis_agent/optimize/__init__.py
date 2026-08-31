@@ -5,6 +5,8 @@ from materials_synthesis_agent.optimize.multi_objective import (
     ParetoSuggestion,
 )
 from materials_synthesis_agent.optimize.single_objective import (
+    CalibrationError,
+    CalibrationReport,
     LiteratureAnchor,
     Observation,
     SingleObjectiveOptimizer,
@@ -13,6 +15,8 @@ from materials_synthesis_agent.optimize.single_objective import (
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParameterSpec
 
 __all__ = [
+    "CalibrationError",
+    "CalibrationReport",
     "LiteratureAnchor",
     "MultiObjectiveOptimizer",
     "MultiObservation",

@@ -21,11 +21,18 @@ from botorch.fit import fit_gpytorch_mll
 from botorch.models import MixedSingleTaskGP
 from botorch.models.model_list_gp_regression import ModelListGP
 from botorch.models.transforms.input import Normalize
+from botorch.models.transforms.outcome import Standardize
 from botorch.optim import optimize_acqf_mixed
 from botorch.utils.multi_objective import is_non_dominated
 from gpytorch.mlls import SumMarginalLogLikelihood
 
-from materials_synthesis_agent.optimize.single_objective import _infer_noise_std
+from materials_synthesis_agent.optimize.single_objective import (
+    CalibrationError,
+    CalibrationReport,
+    Observation,
+    SingleObjectiveOptimizer,
+    _infer_noise_std,
+)
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParamValue
 
 
@@ -63,6 +70,49 @@ class MultiObjectiveOptimizer:
     def _sign(self, objective: Objective) -> float:
         return 1.0 if objective.maximize else -1.0
 
+    def calibration_report(
+        self,
+        observations: list[MultiObservation],
+        tol_z: float = 0.25,
+        tol_coverage: float = 0.10,
+    ) -> dict[str, CalibrationReport]:
+        """Per-objective leave-one-out calibration. Each objective has its own GP, so each is
+        assessed independently -- an aggregate number could hide one objective's intervals sitting
+        at 30% coverage while another looks fine (the "stratified always" guardrail applied to
+        calibration itself). Reuses SingleObjectiveOptimizer's LOO machinery on each objective's
+        marginal, so the diagnostics are identical in meaning to the single-objective case."""
+        reports: dict[str, CalibrationReport] = {}
+        for objective in self.objectives:
+            marginal = [
+                Observation(
+                    params=o.params,
+                    value=o.values[objective.name],
+                    uncertainty=o.uncertainties.get(objective.name),
+                )
+                for o in observations
+            ]
+            opt = SingleObjectiveOptimizer(self.space, maximize=objective.maximize)
+            reports[objective.name] = opt.calibration_report(
+                marginal, tol_z=tol_z, tol_coverage=tol_coverage
+            )
+        return reports
+
+    def check_calibration_or_raise(
+        self,
+        observations: list[MultiObservation],
+        tol_z: float = 0.25,
+        tol_coverage: float = 0.10,
+    ) -> dict[str, CalibrationReport]:
+        """The gate for multi-objective: raises CalibrationError if ANY objective's GP is
+        measurably miscalibrated. A Pareto front is only as trustworthy as its worst-calibrated
+        axis."""
+        reports = self.calibration_report(observations, tol_z=tol_z, tol_coverage=tol_coverage)
+        for name, report in reports.items():
+            if report.passes is False:
+                report.messages.insert(0, f"Objective '{name}' failed calibration.")
+                raise CalibrationError(report)
+        return reports
+
     def _build_models(self, observations: list[MultiObservation]) -> ModelListGP:
         train_x = self.space.encode_batch([o.params for o in observations])
         models = []
@@ -87,6 +137,10 @@ class MultiObjectiveOptimizer:
                 # without it the fitted lengthscale collapses and the posterior reverts to the
                 # training mean a fraction of a percent away from any training point.
                 input_transform=Normalize(d=self.space.dim, bounds=self.space.bounds),
+                # Standardize the (sign-flipped) response so BoTorch's default unit-variance
+                # hyperparameter priors are correctly scaled -- same rationale as the single-
+                # objective GP. Applied per objective, since each has its own scale.
+                outcome_transform=Standardize(m=1),
             )
             models.append(model)
         model_list = ModelListGP(*models)

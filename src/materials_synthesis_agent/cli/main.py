@@ -22,7 +22,13 @@ from materials_synthesis_agent.feasibility import check_protocol_candidate
 from materials_synthesis_agent.literature import build_query, estimate_generation_cost, generate_protocols, search
 from materials_synthesis_agent.llm import PROVIDERS
 from materials_synthesis_agent.nl import estimate_parse_cost, parse_request
-from materials_synthesis_agent.optimize import LiteratureAnchor, Observation, ParameterSpace, SingleObjectiveOptimizer
+from materials_synthesis_agent.optimize import (
+    CalibrationError,
+    LiteratureAnchor,
+    Observation,
+    ParameterSpace,
+    SingleObjectiveOptimizer,
+)
 from materials_synthesis_agent.schema import Decision, Experiment, Metric, ObjectiveDirection, Target, TargetObjective
 from materials_synthesis_agent.storage import Store
 
@@ -620,6 +626,30 @@ def suggest_next(name: str):
         _suggest_next_single(name, space, store, target, candidates, experiments, candidates_by_id)
 
 
+def _calibration_gate_or_exit(optimizer, observations, store):
+    """Calibration gate, the CLI counterpart to the web layer's blocking 409. Refuses to emit a
+    suggestion the loop would trust when the GP's uncertainty is measurably overconfident. Below the
+    minimum sample size the check is a no-op, so early experiments are never blocked. Keeping this
+    in both entry points is deliberate -- CLAUDE.md requires local and hosted to not diverge on the
+    science."""
+    try:
+        optimizer.check_calibration_or_raise(observations)
+    except CalibrationError as e:
+        store.close()
+        console.print("[bold red]Suggestion blocked -- optimizer uncertainty is overconfident.[/bold red]")
+        console.print(
+            "[red]Its intervals cover fewer held-out results than they claim, so a recommendation "
+            "built on it would look more trustworthy than it is.[/red]"
+        )
+        console.print(e.report.summary())
+        if e.report.variance_scale is not None:
+            console.print(
+                f"[dim]Fix: log more results to sharpen the fit, or re-run with "
+                f"variance_scale={e.report.variance_scale:.2f} for honest interval widths.[/dim]"
+            )
+        raise typer.Exit(1)
+
+
 def _suggest_next_single(name, space, store, target, candidates, experiments, candidates_by_id):
     objective = target.all_objectives[0]
     observations = []
@@ -662,6 +692,7 @@ def _suggest_next_single(name, space, store, target, candidates, experiments, ca
             continue
 
     optimizer = SingleObjectiveOptimizer(space, maximize=target.maximize)
+    _calibration_gate_or_exit(optimizer, observations, store)
     suggestion = optimizer.suggest_next(observations, literature_anchors=anchors)
 
     new_candidate = params_to_new_candidate(suggestion.params, target.id)
@@ -726,6 +757,7 @@ def _suggest_next_multi(name, space, store, target, candidates, experiments, can
         raise typer.Exit(0)
 
     optimizer = MultiObjectiveOptimizer(space, [Objective(name=o.name, maximize=o.maximize) for o in objectives])
+    _calibration_gate_or_exit(optimizer, observations, store)
     pareto = optimizer.suggest_next(observations, n_suggestions=4)
 
     import uuid

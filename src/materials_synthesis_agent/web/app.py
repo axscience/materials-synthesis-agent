@@ -16,7 +16,14 @@ from materials_synthesis_agent.cli import project as proj
 from materials_synthesis_agent.cli.params import params_to_new_candidate, protocol_to_params
 from materials_synthesis_agent.feasibility import check_protocol_candidate
 from materials_synthesis_agent.literature import build_query, estimate_generation_cost, generate_protocols, search
-from materials_synthesis_agent.optimize import LiteratureAnchor, Observation, ParameterSpace, SingleObjectiveOptimizer
+from materials_synthesis_agent.optimize import (
+    CalibrationError,
+    CalibrationReport,
+    LiteratureAnchor,
+    Observation,
+    ParameterSpace,
+    SingleObjectiveOptimizer,
+)
 from materials_synthesis_agent.schema import BOSuggestion, Decision, Experiment, Metric
 from materials_synthesis_agent.storage import Store
 
@@ -30,7 +37,7 @@ def _project_name() -> str:
     return name
 
 
-def _page(title: str, body: str) -> HTMLResponse:
+def _page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html>
 <html><head><title>{title}</title>
 <style>
@@ -40,10 +47,38 @@ th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size
 th {{ background: #f4f4f4; }}
 .low-confidence {{ color: #a15c00; }}
 .flag {{ color: #b00020; }}
+pre {{ background: #f7f6f3; border: 1px solid #e0ddd8; padding: 10px 12px; border-radius: 4px; overflow-x: auto; font-size: 0.85em; }}
 form.inline {{ display: inline; }}
 h2 {{ margin-top: 2rem; }}
 </style></head>
-<body><h1>{title}</h1>{body}<p><a href="/">&larr; dashboard</a></p></body></html>""")
+<body><h1>{title}</h1>{body}<p><a href="/">&larr; dashboard</a></p></body></html>""", status_code=status_code)
+
+
+def _calibration_blocked_page(report: CalibrationReport) -> HTMLResponse:
+    """HTTP 409: the surrogate's uncertainty is measurably overconfident, so a suggestion built on
+    it is not trustworthy. This is the "no number without a calibrated interval" guardrail enforced
+    as a blocking status, not a warning banner -- the loop stops here until the model is honest.
+
+    The recommended fix is shown: log more results (the estimate sharpens with data), or accept the
+    recalibrated uncertainty by re-running with the reported variance_scale."""
+    import html
+
+    fix = ""
+    if report.variance_scale is not None:
+        fix = (
+            f"<p><b>Recommended correction:</b> the reported uncertainty is under-stated by about "
+            f"&times;{report.variance_scale ** 0.5:.2f}. Log more results to sharpen the fit, or re-run "
+            f"with <code>variance_scale={report.variance_scale:.2f}</code> to widen the intervals to an "
+            f"honest width.</p>"
+        )
+    body = (
+        "<p class='flag'>Suggestion blocked: the optimizer's uncertainty is <b>overconfident</b> "
+        "(its intervals cover fewer held-out results than they claim), so any recommendation built "
+        "on it would look more trustworthy than it is.</p>"
+        f"<pre>{html.escape(report.summary())}</pre>"
+        f"{fix}"
+    )
+    return _page("Calibration gate: suggestion blocked (409)", body, status_code=409)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -248,6 +283,15 @@ def _web_suggest_single(space, store, target, target_id, candidates, experiments
             continue
 
     optimizer = SingleObjectiveOptimizer(space, maximize=target.maximize)
+    # Calibration gate (blocking 409): refuse to emit a suggestion the loop would trust when the
+    # GP's uncertainty is measurably overconfident. Below the minimum sample size the check is a
+    # no-op (passes=None), so early experiments are never blocked on it.
+    try:
+        optimizer.check_calibration_or_raise(observations)
+    except CalibrationError as e:
+        store.close()
+        return _calibration_blocked_page(e.report)
+
     suggestion = optimizer.suggest_next(observations, literature_anchors=anchors)
 
     new_candidate = params_to_new_candidate(suggestion.params, target_id)
@@ -297,6 +341,14 @@ def _web_suggest_multi(space, store, target, target_id, candidates, experiments,
         return _page("Not enough data", f"<p>Need at least 3 results with all {len(objectives)} objectives measured.</p>")
 
     optimizer = MultiObjectiveOptimizer(space, [Objective(name=o.name, maximize=o.maximize) for o in objectives])
+    # Calibration gate (blocking 409): a Pareto front is only as trustworthy as its worst-calibrated
+    # objective, so this raises if ANY objective's GP is overconfident.
+    try:
+        optimizer.check_calibration_or_raise(observations)
+    except CalibrationError as e:
+        store.close()
+        return _calibration_blocked_page(e.report)
+
     pareto = optimizer.suggest_next(observations, n_suggestions=4)
 
     pareto_set_id = str(uuid.uuid4())
