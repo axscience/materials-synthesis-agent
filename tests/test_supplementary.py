@@ -10,12 +10,15 @@ from materials_synthesis_agent.literature.retrieval import Paper
 
 
 def _fake_landing(monkeypatch, html):
-    def fake_get(url, timeout_s=None, timeout=None, headers=None):
-        return SimpleNamespace(
-            status_code=200, text=html, url="https://pubs.example.org/doi/10.1021/x",
-            headers={"content-type": "text/html"}, raise_for_status=lambda: None,
-        )
-    monkeypatch.setattr(ft.requests, "get", fake_get)
+    resp = SimpleNamespace(
+        status_code=200, text=html, url="https://pubs.example.org/doi/10.1021/x",
+        headers={"content-type": "text/html"}, raise_for_status=lambda: None,
+    )
+    # resolve_si_pdf_urls fetches via _get_cloudscraper().get(...), so patch the scraper factory
+    # (patching requests.get alone is bypassed whenever cloudscraper is installed).
+    scraper = SimpleNamespace(get=lambda url, timeout=None: resp)
+    monkeypatch.setattr(ft, "_get_cloudscraper", lambda: scraper)
+    monkeypatch.setattr(ft.requests, "get", lambda *a, **k: resp)
 
 
 def test_resolve_si_urls_finds_common_publisher_patterns(monkeypatch):

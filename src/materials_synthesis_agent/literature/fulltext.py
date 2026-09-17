@@ -129,8 +129,20 @@ def extract_relevant_section(full_text: str, max_chars: int = 8000) -> str:
 # where the landing page is server-rendered with real SI links and is defeated by JS-only pages or
 # hard bot-blocking, in which case it returns nothing and the caller falls back exactly as before.
 _SI_URL_MARKERS = (
-    "suppl_file", "downloadsupplement", "moesm", "_esm", "/esm/", "suppdata",
-    "supporting-information", "supplementary", "/suppl/", "_si_", "-si.pdf", "_si.pdf",
+    # generic
+    "suppl_file", "downloadsupplement", "supporting-information", "supplementary",
+    "supplementary-material", "supplementary_material", "electronic-supplementary",
+    "supp-info", "sup-info", "supp_info", "/suppl/",
+    # Nature / Springer (…MOESM1_ESM.pdf)
+    "moesm", "_esm", "/esm/",
+    # RSC (…/suppdata/…)
+    "suppdata",
+    # ACS (…_si_001.pdf, /doi/suppl/)
+    "_si_", "-si.pdf", "_si.pdf", "/doi/suppl/",
+    # Wiley (…-sup-0001-SuppMat.pdf, /asset/supinfo)
+    "-sup-", "suppmat", "supinfo", "/asset/",
+    # Elsevier / ScienceDirect (…-mmc1.pdf)
+    "mmc",
 )
 _HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 
