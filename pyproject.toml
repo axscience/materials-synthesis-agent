@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "PyJWT[crypto]>=2.8"]
 # aizynthfinder pulls in numba unconstrained (via its `paretoset` dependency), and pip resolves
 # that to the newest numba, which requires llvmlite==0.49.x -- a version with no prebuilt wheel
 # for Intel macOS, forcing a from-source build that needs the LLVM toolchain (llvm-config) to

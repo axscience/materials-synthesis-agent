@@ -14,10 +14,12 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from materials_synthesis_agent.harness.auth import Tenant, current_tenant
 from materials_synthesis_agent.harness.campaign import Campaign, Session
 from materials_synthesis_agent.harness.planner import Planner, ToolCaller
 from materials_synthesis_agent.harness.session_export import session_to_markdown
@@ -62,36 +64,62 @@ def create_app(
     caller_factory: Optional[Callable[[], ToolCaller]] = None,
 ) -> FastAPI:
     workspace = Path(workspace)
-    (workspace / "campaigns").mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
     caller_factory = caller_factory or _default_caller_factory
 
     app = FastAPI(title="Discovery Harness")
 
-    def _store(campaign_id: str) -> CampaignStore:
-        return CampaignStore(workspace / "campaigns" / campaign_id / "campaign.db")
+    # A Lovable/Supabase front end is served from a different origin, so it needs CORS. Lock this to
+    # your front end's origin(s) in production via HARNESS_CORS_ORIGINS (comma-separated); the "*"
+    # default is convenient for first-connect but should not ship to real users.
+    origins_env = os.environ.get("HARNESS_CORS_ORIGINS", "*").strip()
+    origins = ["*"] if origins_env == "*" else [o.strip() for o in origins_env.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=origins != ["*"],  # cannot use credentials with a wildcard origin
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-    def _priors() -> PriorStore:
-        return PriorStore(workspace / "priors.db")
+    def _tenant_root(tenant_id: str) -> Path:
+        # Per-tenant isolation on the current SQLite storage: every tenant gets its own subtree, so
+        # one user's campaigns/priors/index never touch another's. (The Phase-4 Postgres port
+        # replaces this file layout with RLS, but the isolation boundary -- tenant_id -- is the same.)
+        root = workspace / "tenants" / tenant_id
+        (root / "campaigns").mkdir(parents=True, exist_ok=True)
+        return root
 
-    def _index() -> CampaignStore:
-        # A small index DB listing campaigns (campaign rows are duplicated here for the sidebar; the
-        # authoritative copy lives in each campaign's own db).
-        return CampaignStore(workspace / "index.db")
+    def _store(tenant_id: str, campaign_id: str) -> CampaignStore:
+        return CampaignStore(_tenant_root(tenant_id) / "campaigns" / campaign_id / "campaign.db")
+
+    def _priors(tenant_id: str) -> PriorStore:
+        # Per-tenant warm prior: cross-campaign learning stays within one tenant, never across.
+        return PriorStore(_tenant_root(tenant_id) / "priors.db")
+
+    def _index(tenant_id: str) -> CampaignStore:
+        # A small per-tenant index DB listing that tenant's campaigns (rows duplicated here for the
+        # sidebar; the authoritative copy lives in each campaign's own db).
+        return CampaignStore(_tenant_root(tenant_id) / "index.db")
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok", "auth_mode": os.environ.get("AUTH_MODE", "disabled")}
 
     # -- campaigns --------------------------------------------------------
 
     @app.get("/api/campaigns")
-    def list_campaigns():
-        idx = _index()
+    def list_campaigns(tenant: Tenant = Depends(current_tenant)):
+        idx = _index(tenant.id)
         out = [{"id": c.id, "name": c.name, "status": c.status.value,
                 "updated_at": c.updated_at.isoformat()} for c in idx.list_campaigns()]
         idx.close()
         return out
 
     @app.post("/api/campaigns")
-    def create_campaign(body: CreateCampaignIn):
+    def create_campaign(body: CreateCampaignIn, tenant: Tenant = Depends(current_tenant)):
         campaign = Campaign(name=body.name, linkage_chemistry=body.linkage_chemistry)
-        store = _store(campaign.id)
+        store = _store(tenant.id, campaign.id)
         if body.metric_name and body.linkage_chemistry:
             from materials_synthesis_agent.schema import Target
 
@@ -106,12 +134,12 @@ def create_app(
             campaign.target_id = target.id
         store.save_campaign(campaign)
         store.close()
-        idx = _index(); idx.save_campaign(campaign); idx.close()
+        idx = _index(tenant.id); idx.save_campaign(campaign); idx.close()
         return {"id": campaign.id, "name": campaign.name}
 
     @app.get("/api/campaigns/{campaign_id}")
-    def get_campaign(campaign_id: str):
-        store = _store(campaign_id)
+    def get_campaign(campaign_id: str, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
         c = store.get_campaign(campaign_id)
         if c is None:
             store.close()
@@ -129,8 +157,8 @@ def create_app(
     # -- state (backs the review + log screens) --------------------------
 
     @app.get("/api/campaigns/{campaign_id}/state")
-    def campaign_state(campaign_id: str):
-        store = _store(campaign_id)
+    def campaign_state(campaign_id: str, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
         c = store.get_campaign(campaign_id)
         if c is None or not c.target_id:
             store.close()
@@ -147,13 +175,13 @@ def create_app(
     # -- chat -------------------------------------------------------------
 
     @app.post("/api/campaigns/{campaign_id}/chat")
-    def chat(campaign_id: str, body: ChatIn):
-        store = _store(campaign_id)
+    def chat(campaign_id: str, body: ChatIn, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
         campaign = store.get_campaign(campaign_id)
         if campaign is None:
             store.close()
             raise HTTPException(404, "No such campaign.")
-        priors = _priors()
+        priors = _priors(tenant.id)
         session = (store.get_session(body.session_id) if body.session_id else None) \
             or Session(campaign_id=campaign_id)
         # Extraction runs an LLM (the Extractor role); give the context a client when a key is set.
@@ -173,7 +201,7 @@ def create_app(
         )
         planner = Planner(ctx, caller_factory())
         reply = planner.respond(body.message, session)
-        idx = _index(); idx.save_campaign(campaign); idx.close()  # keep the sidebar fresh
+        idx = _index(tenant.id); idx.save_campaign(campaign); idx.close()  # keep the sidebar fresh
         last = session.turns[-1] if session.turns else None
         store.close(); priors.close()
         return {"reply": reply, "session_id": session.id,
@@ -182,13 +210,13 @@ def create_app(
     # -- direct log-result form ------------------------------------------
 
     @app.post("/api/campaigns/{campaign_id}/log")
-    def log_result(campaign_id: str, body: LogResultIn):
-        store = _store(campaign_id)
+    def log_result(campaign_id: str, body: LogResultIn, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
         campaign = store.get_campaign(campaign_id)
         if campaign is None:
             store.close()
             raise HTTPException(404, "No such campaign.")
-        priors = _priors()
+        priors = _priors(tenant.id)
         ctx = ToolContext(store=store, prior_store=priors, campaign=campaign)
         try:
             output, gate = run_tool(ctx, "store.log_result", body.model_dump())
@@ -201,8 +229,8 @@ def create_app(
     # -- sessions + export ------------------------------------------------
 
     @app.get("/api/campaigns/{campaign_id}/sessions")
-    def list_sessions(campaign_id: str):
-        store = _store(campaign_id)
+    def list_sessions(campaign_id: str, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
         out = [{"id": s.id, "started_at": s.started_at.isoformat(),
                 "turns": len(s.turns), "cost": s.total_cost}
                for s in store.list_sessions(campaign_id)]
@@ -210,8 +238,8 @@ def create_app(
         return out
 
     @app.get("/api/campaigns/{campaign_id}/sessions/{session_id}/export")
-    def export_session(campaign_id: str, session_id: str):
-        store = _store(campaign_id)
+    def export_session(campaign_id: str, session_id: str, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
         campaign = store.get_campaign(campaign_id)
         session = store.get_session(session_id)
         if campaign is None or session is None:
