@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from materials_synthesis_agent.llm import LLMClient
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParameterSpec
 from materials_synthesis_agent.schema import ProtocolCandidate, Target
+
+if TYPE_CHECKING:  # `materials` imports `literature.normalize`, so import the pack lazily at runtime
+    from materials_synthesis_agent.materials import MaterialPack
 
 logger = logging.getLogger(__name__)
 
@@ -31,97 +34,81 @@ logger = logging.getLogger(__name__)
 # Step 2: Auto-derive ParameterSpace from extracted protocols (no LLM needed)
 # ---------------------------------------------------------------------------
 
-_CONTINUOUS_FIELDS = {
-    "temperature_c": (25.0, 300.0),
-    "time_hours": (0.5, 168.0),
-    "concentration_molar": (0.001, 1.0),
-}
-
-_CATEGORICAL_FIELDS = ["solvent", "catalyst", "modulator", "synthesis_method", "atmosphere"]
-
-
-def _parse_numeric(value: str) -> Optional[float]:
-    """Best-effort numeric extraction from a free-text field value."""
-    cleaned = value.split()[0].rstrip("°CcMmHh%")
-    try:
-        return float(cleaned)
-    except (ValueError, IndexError):
-        return None
-
-
-def _normalize_category(value: str) -> str:
-    return value.strip().lower().replace("  ", " ")
+# Which synthesis conditions are parameters -- and their vocabularies, parse kinds, and physical
+# clamps -- now come from the campaign's MaterialPack (materials.packs), not module constants, so a
+# new material class is added as data. `pack=None` falls back to the default (COF) pack, preserving
+# every caller that predates packs.
 
 
 def derive_parameter_space(
     protocols: list[ProtocolCandidate],
     margin_fraction: float = 0.2,
     min_margin: float = 5.0,
+    pack: Optional["MaterialPack"] = None,
 ) -> Optional[ParameterSpace]:
     """Build a ParameterSpace from the union of conditions across all extracted protocols.
 
     Continuous parameters get bounds from [min - margin, max + margin] of observed values,
-    clamped to physically reasonable floors/ceilings. Categorical parameters collect every
-    distinct value seen. Parameters observed in fewer than 2 protocols are skipped (not enough
-    signal to define a meaningful range).
+    clamped to the pack's physically reasonable floors/ceilings. Categorical parameters collect
+    every distinct value seen, bucketed to the pack's controlled vocabulary. Parameters observed in
+    fewer than 2 protocols are skipped (not enough signal to define a meaningful range).
 
     Returns None if fewer than 2 protocols have extractable conditions."""
+    if pack is None:
+        from materials_synthesis_agent.materials import default_pack
+        pack = default_pack()
     if len(protocols) < 2:
         return None
 
-    continuous_values: dict[str, list[float]] = {k: [] for k in _CONTINUOUS_FIELDS}
-    categorical_values: dict[str, set[str]] = {k: set() for k in _CATEGORICAL_FIELDS}
-
-    from materials_synthesis_agent.literature.normalize import (
-        canonicalize_category,
-        parse_quantity,
-    )
+    continuous_values: dict[str, list[float]] = {f.name: [] for f in pack.continuous_fields}
+    categorical_values: dict[str, set[str]] = {f.name: set() for f in pack.categorical_fields}
 
     for p in protocols:
-        for field_name in _CONTINUOUS_FIELDS:
-            fv = getattr(p, field_name, None)
+        for name in continuous_values:
+            fv = getattr(p, name, None)
             if fv is not None:
-                num = parse_quantity(fv.value, field_name)
+                num = pack.parse_quantity(name, fv.value)
                 if num is not None:
-                    continuous_values[field_name].append(num)
+                    continuous_values[name].append(num)
 
         for exp in p.literature_experiments:
             for cond_name, cond_fv in exp.conditions.items():
                 if cond_name in continuous_values:
-                    num = parse_quantity(cond_fv.value, cond_name)
+                    num = pack.parse_quantity(cond_name, cond_fv.value)
                     if num is not None:
                         continuous_values[cond_name].append(num)
                 elif cond_name in categorical_values:
-                    canon = canonicalize_category(cond_name, cond_fv.value)
+                    canon = pack.canonicalize(cond_name, cond_fv.value)
                     if canon is not None:
                         categorical_values[cond_name].add(canon)
 
-        for field_name in _CATEGORICAL_FIELDS:
-            fv = getattr(p, field_name, None)
+        for name in categorical_values:
+            fv = getattr(p, name, None)
             if fv is not None:
-                canon = canonicalize_category(field_name, fv.value)
+                canon = pack.canonicalize(name, fv.value)
                 if canon is not None:  # unrecognized/not-stated -> not a category
-                    categorical_values[field_name].add(canon)
+                    categorical_values[name].add(canon)
 
     specs: list[ParameterSpec] = []
-    for field_name, (abs_lo, abs_hi) in _CONTINUOUS_FIELDS.items():
-        vals = continuous_values[field_name]
+    for f in pack.continuous_fields:
+        vals = continuous_values[f.name]
         if len(vals) < 2:
             continue
         lo, hi = min(vals), max(vals)
         margin = max((hi - lo) * margin_fraction, min_margin)
+        abs_lo, abs_hi = f.abs_bounds
         specs.append(ParameterSpec(
-            name=field_name,
+            name=f.name,
             kind="continuous",
             bounds=(max(abs_lo, lo - margin), min(abs_hi, hi + margin)),
         ))
 
-    for field_name in _CATEGORICAL_FIELDS:
-        cats = sorted(categorical_values[field_name])
+    for f in pack.categorical_fields:
+        cats = sorted(categorical_values[f.name])
         if len(cats) < 2:
             continue
         specs.append(ParameterSpec(
-            name=field_name,
+            name=f.name,
             kind="categorical",
             categories=tuple(cats),
         ))
@@ -130,7 +117,8 @@ def derive_parameter_space(
         return None
 
     logger.info(
-        "Derived parameter space: %d continuous + %d categorical dimensions from %d protocols",
+        "Derived parameter space (%s pack v%s): %d continuous + %d categorical dimensions from %d protocols",
+        pack.key, pack.version,
         sum(1 for s in specs if s.kind == "continuous"),
         sum(1 for s in specs if s.kind == "categorical"),
         len(protocols),
@@ -223,7 +211,9 @@ def _summarize_protocols(protocols: list[ProtocolCandidate]) -> str:
     return "\n\n".join(lines)
 
 
-def _build_expansion_prompt(target: Target, protocols: list[ProtocolCandidate]) -> str:
+def _build_expansion_prompt(
+    target: Target, protocols: list[ProtocolCandidate], pack: "MaterialPack"
+) -> str:
     target_parts = []
     if target.name:
         target_parts.append(f"Material: {target.name}")
@@ -234,7 +224,8 @@ def _build_expansion_prompt(target: Target, protocols: list[ProtocolCandidate]) 
     if objectives:
         target_parts.append(f"Optimizing: {', '.join(o.name + ' (' + o.direction.value + ')' for o in objectives)}")
 
-    return f"""You are a materials scientist specializing in COF synthesis optimization. You have
+    hints = "\n".join(f"- {h}" for h in pack.prompts.dimension_hints)
+    return f"""You are {pack.prompts.persona}. You have
 extracted {len(protocols)} synthesis protocols from the literature for the following target:
 
 {chr(10).join(target_parts)}
@@ -243,26 +234,18 @@ HERE ARE THE CONDITIONS THAT HAVE BEEN TRIED:
 {_summarize_protocols(protocols)}
 
 YOUR TASK: Propose conditions that HAVE NOT been tried in these protocols but are chemically
-reasonable and worth exploring. Think like LFAST (Yaghi group, JACS 2026) -- the goal is to
-expand the design space beyond what papers report, not just interpolate within it.
+reasonable and worth exploring. Think like {pack.prompts.method_reference} -- the goal is to
+expand the design space beyond what papers report, not just interpolate within it. Consider
+compatibility with {pack.prompts.bond_noun} throughout.
 
 For each suggestion, consider:
-- Solvents: what solvent systems haven't been tried? Consider polarity, boiling point, and
-  compatibility with {target.linkage_chemistry} bond formation. Mixed solvents with different
-  ratios count as distinct conditions.
-- Temperature: are there unexplored temperature regimes? Low-temperature crystallization
-  (RT to 60°C) vs high-temperature (>150°C)?
-- Modulators: what modulators/catalysts haven't been tested? Different acid strengths,
-  concentrations, or altogether different modulators (Lewis acids, bases)?
-- Time: short reactions (<6h) or very long ones (>7d) that haven't been explored?
-- Concentration: dilute vs concentrated conditions?
-- Atmosphere: has anyone tried vacuum or specific gas atmospheres?
+{hints}
 
-Be specific -- "try a different solvent" is useless; "try DMF/mesitylene 4:1 v/v because DMF's
-higher polarity may favor nucleation for imine COFs" is actionable.
+Be specific -- "try a different solvent" is useless; a suggestion should name the exact condition
+and the chemical reasoning for it.
 
 Only propose conditions that are SAFE and chemically reasonable. Do not suggest conditions that
-would decompose the monomers or are known to be incompatible with {target.linkage_chemistry} chemistry."""
+would decompose the reagents or are known to be incompatible with {target.linkage_chemistry} chemistry."""
 
 
 def expand_design_space(
@@ -270,6 +253,7 @@ def expand_design_space(
     protocols: list[ProtocolCandidate],
     client: Optional[LLMClient] = None,
     model: Optional[str] = None,
+    pack: Optional["MaterialPack"] = None,
 ) -> DesignSpaceExpansion:
     """Ask the LLM to propose untried conditions based on the extracted protocols.
     This is the LFAST steps 4-5 equivalent: "what should we try that the literature hasn't?"
@@ -277,12 +261,15 @@ def expand_design_space(
     Requires an LLM client. Returns an empty expansion if client is None."""
     if not protocols:
         return DesignSpaceExpansion()
+    if pack is None:
+        from materials_synthesis_agent.materials import default_pack
+        pack = default_pack()
 
     if client is None:
         from materials_synthesis_agent.cli.llm_config import get_configured_llm_client
         client = get_configured_llm_client(model=model)
 
-    prompt = _build_expansion_prompt(target, protocols)
+    prompt = _build_expansion_prompt(target, protocols, pack)
 
     data = client.call_tool(
         prompt=prompt,
@@ -364,7 +351,9 @@ _REASONING_TOOL_SCHEMA = {
 }
 
 
-def _build_reasoning_prompt(target: Target, protocols: list[ProtocolCandidate]) -> str:
+def _build_reasoning_prompt(
+    target: Target, protocols: list[ProtocolCandidate], pack: "MaterialPack"
+) -> str:
     target_parts = []
     if target.name:
         target_parts.append(f"Material: {target.name}")
@@ -373,7 +362,7 @@ def _build_reasoning_prompt(target: Target, protocols: list[ProtocolCandidate]) 
     if objectives:
         target_parts.append(f"Optimizing: {', '.join(o.name + ' (' + o.direction.value + ')' for o in objectives)}")
 
-    return f"""You are a materials scientist analyzing {len(protocols)} synthesis protocols extracted from
+    return f"""You are {pack.prompts.persona}, analyzing {len(protocols)} synthesis protocols extracted from
 the literature for:
 
 {chr(10).join(target_parts)}
@@ -406,18 +395,22 @@ def cross_protocol_reasoning(
     protocols: list[ProtocolCandidate],
     client: Optional[LLMClient] = None,
     model: Optional[str] = None,
+    pack: Optional["MaterialPack"] = None,
 ) -> CrossProtocolAnalysis:
     """Synthesize patterns across all extracted protocols. Requires an LLM client."""
     if len(protocols) < 2:
         return CrossProtocolAnalysis(
             recommended_starting_point="Not enough protocols to synthesize patterns."
         )
+    if pack is None:
+        from materials_synthesis_agent.materials import default_pack
+        pack = default_pack()
 
     if client is None:
         from materials_synthesis_agent.cli.llm_config import get_configured_llm_client
         client = get_configured_llm_client(model=model)
 
-    prompt = _build_reasoning_prompt(target, protocols)
+    prompt = _build_reasoning_prompt(target, protocols, pack)
 
     data = client.call_tool(
         prompt=prompt,

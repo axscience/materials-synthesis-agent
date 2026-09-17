@@ -100,6 +100,12 @@ class Target(BaseModel):
     )
     functional_groups: list[str]
     linkage_chemistry: str
+    material_class: str = Field(
+        default="cof",
+        description="Which material pack governs this campaign's parameter vocabulary, plausibility "
+        "bounds, SMILES-validation roles, and prompt framing (see materials.packs). 'cof' (default) "
+        "or 'mof'. Defaults to 'cof' so targets saved before packs existed keep working unchanged.",
+    )
     application: str
     metric_name: str
     metric_measurement_method: str

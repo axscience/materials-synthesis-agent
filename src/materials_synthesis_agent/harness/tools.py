@@ -45,6 +45,22 @@ class ToolError(RuntimeError):
     """A handler failure the planner should see as an error result (not a crash)."""
 
 
+def _ctx_pack(ctx: "ToolContext"):
+    """The MaterialPack governing this campaign, from its target's `material_class`. Falls back to
+    the default (COF) pack when there is no target yet or the class is unknown, so the loop never
+    breaks on pack resolution -- a bad class degrades to the default, it doesn't crash a tool."""
+    from materials_synthesis_agent.materials import default_pack, get_pack
+
+    target = ctx.store.get_target(ctx.campaign.target_id) if ctx.campaign.target_id else None
+    material_class = getattr(target, "material_class", None)
+    if not material_class:
+        return default_pack()
+    try:
+        return get_pack(material_class)
+    except KeyError:
+        return default_pack()
+
+
 # --------------------------------------------------------------------------- #
 # Parameter-space helpers (kept torch-free where possible)
 # --------------------------------------------------------------------------- #
@@ -128,7 +144,7 @@ def h_derive_space(ctx: ToolContext) -> dict:
     from materials_synthesis_agent.literature import derive_parameter_space
 
     candidates = ctx.store.list_protocol_candidates(target.id)
-    space = derive_parameter_space(candidates)
+    space = derive_parameter_space(candidates, pack=_ctx_pack(ctx))
     if space is None:
         raise ToolError("Not enough extracted protocols with conditions to derive a space "
                         "(need >= 2). Run lit.extract_protocols first.")
@@ -225,6 +241,7 @@ def _build_observations(ctx: ToolContext, space, objective_name: str):
     )
     from materials_synthesis_agent.optimize import Observation
 
+    pack = _ctx_pack(ctx)
     target_id = ctx.campaign.target_id
     candidates = {c.id: c for c in ctx.store.list_protocol_candidates(target_id)}
 
@@ -236,8 +253,8 @@ def _build_observations(ctx: ToolContext, space, objective_name: str):
     #    only the latter, so seeding from experiments alone leaves the GP empty (see the live smoke
     #    test) -- including measured_outcomes recovers those single-point papers.
     for cand in candidates.values():
-        obs.extend(selected_experiments_to_observations(cand, space, objective_name))
-        obs.extend(outcomes_to_observations(cand, space, objective_name))
+        obs.extend(selected_experiments_to_observations(cand, space, objective_name, pack))
+        obs.extend(outcomes_to_observations(cand, space, objective_name, pack))
 
     # 2. User-logged bench results (accumulate across reruns of the loop).
     for exp in ctx.store.list_experiments(target_id):
@@ -255,7 +272,7 @@ def _build_observations(ctx: ToolContext, space, objective_name: str):
     #    reach the GP -- one bad point inflates the surrogate's apparent noise and breaks calibration.
     from materials_synthesis_agent.harness.gates import plausible_outcome
 
-    return [o for o in obs if plausible_outcome(objective_name, o.value)]
+    return [o for o in obs if plausible_outcome(objective_name, o.value, pack)]
 
 
 def _extrapolation_note(params: dict, observations, specs: list[dict]) -> str:
@@ -539,5 +556,5 @@ def run_tool(ctx: ToolContext, name: str, tool_input: dict) -> tuple[dict, Gate]
     ToolError propagate to the planner's dispatch, which turns them into error results."""
     handler = HANDLERS[name]
     output = handler(ctx, **(tool_input or {}))
-    gate = run_gates(name, output)
+    gate = run_gates(name, output, pack=_ctx_pack(ctx))
     return output, gate

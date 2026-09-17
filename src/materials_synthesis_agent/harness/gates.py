@@ -17,7 +17,7 @@ out of v1; when added it annotates, it never triggers an automatic replan.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -60,12 +60,18 @@ _PLAUSIBLE_BOUNDS: dict[str, tuple[float, float]] = {
 }
 
 
-def plausible_outcome(metric_name: str, value) -> bool:
+def plausible_outcome(metric_name: str, value, pack=None) -> bool:
     """True if `value` is a physically plausible measurement of `metric_name`. Rejects non-finite
     values, and anything at or below the metric's floor (so a 0.0 surface area -- almost always a
     mis-extraction of 'not reported' -- is dropped) or above its ceiling. Metrics with no known
     bounds must simply be positive and finite: a measured property that comes out <= 0 is far more
-    likely an extraction error than a real datum."""
+    likely an extraction error than a real datum.
+
+    When a `pack` is given, its plausibility bounds are used (a MOF's h2/ch4/water uptake, etc.);
+    otherwise the legacy COF bounds below apply, so every existing caller is unchanged."""
+    if pack is not None:
+        return pack.plausible_outcome(metric_name, value)
+
     import math
 
     if value is None:
@@ -121,15 +127,26 @@ def _gate_suggestion(output: Any) -> Gate:
     return Gate.ok()
 
 
-def _gate_extraction(output: Any) -> Gate:
+def _gate_extraction(output: Any, pack=None) -> Gate:
     """Extracted building-block SMILES must be chemically valid. The citation-or-inferred invariant
-    is already guaranteed by the FieldValue schema validator, so it needs no gate here."""
+    is already guaranteed by the FieldValue schema validator, so it needs no gate here.
+
+    A block is SMILES-validated only when its monomer_role is one the pack marks as organic
+    (`smiles_roles`). This is what lets a MOF pass: its metal node / SBU is not a small-molecule
+    SMILES, so it is skipped rather than blocking the whole extraction. With no pack (or an empty
+    smiles_roles, the COF default) every block is validated, as before."""
     d = _as_dict(output)
     blocks = d.get("building_blocks") or {}
     if not isinstance(blocks, dict):
         return Gate.ok()
+    roles = d.get("monomer_roles") or {}
     invalid = []
     for name, fv in blocks.items():
+        if pack is not None:
+            role_fv = roles.get(name) if isinstance(roles, dict) else None
+            role = role_fv.get("value") if isinstance(role_fv, dict) else getattr(role_fv, "value", None)
+            if not pack.validates_smiles_for_role(role):
+                continue
         smiles = fv.get("value") if isinstance(fv, dict) else getattr(fv, "value", None)
         if smiles and not validate_smiles(str(smiles)):
             invalid.append(name)
@@ -164,6 +181,11 @@ _GATES = {
 }
 
 
-def run_gates(tool_name: str, output: Any) -> Gate:
+def run_gates(tool_name: str, output: Any, pack=None) -> Gate:
     gate = _GATES.get(tool_name)
-    return gate(output) if gate else Gate.ok()
+    if gate is None:
+        return Gate.ok()
+    # Only the extraction gate is pack-aware (SMILES-role selection); the others ignore it.
+    if gate is _gate_extraction:
+        return gate(output, pack)
+    return gate(output)
