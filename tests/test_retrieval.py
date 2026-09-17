@@ -209,3 +209,48 @@ def test_search_merges_semantic_scholar_and_openalex_deduped_by_doi():
     assert [p.source_id for p in papers] == ["10.1/a", "10.1/b"]   # deduped, order preserved
     assert papers[0].source == "semantic_scholar"                   # S2 copy kept for the shared DOI
     assert {p.title for p in papers} == {"Alpha COF", "Beta COF"}
+
+
+def test_search_tiers_are_metric_aware_for_specific_objectives():
+    """The objective metric is folded into the query so retrieval favors papers that report it."""
+    from materials_synthesis_agent.literature.linkage_fallback import build_search_tiers
+    from materials_synthesis_agent.schema import Target
+    t = Target(name=None, functional_groups=["amine", "aldehyde"], linkage_chemistry="imine",
+               application="gas storage", metric_name="BET_surface_area",
+               metric_measurement_method="N2 adsorption")
+    linkage_tier = next(x for x in build_search_tiers(t) if "same linkage" in x.label)
+    assert "BET surface area" in linkage_tier.query
+
+
+def test_search_tiers_skip_generic_crystallinity_in_query():
+    from materials_synthesis_agent.literature.linkage_fallback import build_search_tiers
+    from materials_synthesis_agent.schema import Target
+    t = Target(name=None, functional_groups=["amine", "aldehyde"], linkage_chemistry="imine",
+               application="gas storage", metric_name="crystallinity",
+               metric_measurement_method="PXRD")
+    linkage_tier = next(x for x in build_search_tiers(t) if "same linkage" in x.label)
+    assert "crystallinity" not in linkage_tier.query.lower()
+
+
+def test_count_on_metric_counts_only_matching_data_points():
+    """The >=50 target counts on-metric data points (experiments + single outcomes), not protocols
+    that report some other property."""
+    from materials_synthesis_agent.literature.agent import _count_on_metric
+    from materials_synthesis_agent.schema import (
+        LiteratureExperiment, MeasuredOutcome, ProtocolCandidate, ProtocolSource,
+    )
+
+    def _exp(metric, val):
+        return LiteratureExperiment(
+            label=metric, conditions={},
+            outcome=MeasuredOutcome(metric_name=metric, value=val, unit="x", measurement_method="m"))
+
+    c1 = ProtocolCandidate(target_id="t", source=ProtocolSource.LITERATURE,
+                           literature_experiments=[_exp("BET_surface_area", 1400), _exp("yield", 90)],
+                           measured_outcomes=[MeasuredOutcome(metric_name="BET surface area", value=800,
+                                                              unit="m2/g", measurement_method="N2")])
+    c2 = ProtocolCandidate(target_id="t", source=ProtocolSource.LITERATURE,
+                           measured_outcomes=[MeasuredOutcome(metric_name="crystallinity", value=0.8,
+                                                              unit="r", measurement_method="PXRD")])
+    # c1: 1 BET experiment + 1 BET outcome = 2 ; c2: 0 ; yield/crystallinity don't count.
+    assert _count_on_metric([c1, c2], "BET_surface_area") == 2

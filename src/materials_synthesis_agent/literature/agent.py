@@ -103,6 +103,19 @@ def _extract_tier(
     return out
 
 
+def _count_on_metric(candidates: list[ProtocolCandidate], metric_name: str) -> int:
+    """Count the data points that would actually seed the GP: literature experiments and single
+    measured outcomes whose metric matches the objective. This is what 'N experiments extracted'
+    means for the optimizer -- protocols that report some other property don't count."""
+    from materials_synthesis_agent.literature.outcomes import _metric_matches
+
+    total = 0
+    for c in candidates:
+        total += sum(1 for e in c.literature_experiments if _metric_matches(e.outcome.metric_name, metric_name))
+        total += sum(1 for o in c.measured_outcomes if _metric_matches(o.metric_name, metric_name))
+    return total
+
+
 def _protocol_fingerprint(candidate: ProtocolCandidate) -> str:
     """Group key for deduplication: same building blocks = same material family.
     Within a family, coarse-bucket the temperature to separate genuinely different conditions.
@@ -184,6 +197,7 @@ def generate_protocols(
     unpaywall_email: Optional[str] = None,
     confirm_expand: Optional[Callable[[list[str]], bool]] = None,
     require_full_text: bool = False,
+    target_experiments: int = 0,
 ) -> list[ProtocolCandidate]:
     """Search for papers relevant to `target` and return up to `n` deduplicated candidate protocols,
     proceeding hierarchically by linkage chemistry (see module docstring).
@@ -208,13 +222,22 @@ def generate_protocols(
     Returns fewer than `n` (possibly zero) when the literature doesn't have enough."""
     per_tier_limit = search_limit or max(n, 8)
     per_tier_extract = max(n, 6)
+    if target_experiments:
+        # Data-point-driven mode: extract as many protocols per tier as we might need, and keep
+        # searching (auto-expanding into related linkages) until we have >= target_experiments
+        # on-metric data points -- the number the GP actually needs to be confident.
+        per_tier_extract = max(per_tier_extract, target_experiments)
     tiers = build_search_tiers(target)
     candidates: list[ProtocolCandidate] = []
     asked_to_expand = False
 
     for tier in tiers:
         if tier.beyond_target_linkage:
-            if not asked_to_expand:
+            if target_experiments:
+                # Auto-expand into related linkages only while still short of the data-point target.
+                if _count_on_metric(candidates, target.metric_name) >= target_experiments:
+                    break
+            elif not asked_to_expand:
                 asked_to_expand = True
                 if len(candidates) >= n:
                     break
@@ -226,13 +249,22 @@ def generate_protocols(
             unpaywall_email, require_full_text=require_full_text,
         )
         candidates.extend(tier_results)
-        logger.info("Tier '%s': extracted %d protocols (%d total so far)", tier.label, len(tier_results), len(candidates))
+        got = _count_on_metric(candidates, target.metric_name)
+        logger.info("Tier '%s': extracted %d protocols (%d total, %d on-metric data points)",
+                    tier.label, len(tier_results), len(candidates), got)
+        if target_experiments and got >= target_experiments:
+            break
 
     pre_dedup = len(candidates)
     candidates = deduplicate_protocols(candidates)
     logger.info("Deduplication: %d protocols -> %d unique families", pre_dedup, len(candidates))
 
-    total_experiments = sum(len(c.literature_experiments) for c in candidates)
-    logger.info("Total experiments across all protocols: %d (target for GP: 15-30)", total_experiments)
+    total = _count_on_metric(candidates, target.metric_name)
+    logger.info("On-metric data points across all protocols: %d (target: %s)",
+                total, target_experiments or "15-30")
+    if target_experiments and total < target_experiments:
+        logger.info("Literature exhausted at %d on-metric points (< target %d) -- returning what "
+                    "was found.", total, target_experiments)
 
-    return candidates[:n]
+    # In data-point mode keep every candidate (each carries data points); otherwise cap at n.
+    return candidates if target_experiments else candidates[:n]

@@ -63,12 +63,24 @@ class SearchTier:
     beyond_target_linkage: bool  # True once we've left the target's own linkage chemistry
 
 
+def _humanize_metric(metric_name: str) -> str:
+    """A search-friendly form of the objective metric ('BET_surface_area' -> 'BET surface area'),
+    so retrieval favors papers that actually REPORT the metric the GP will optimize -- otherwise the
+    corpus fills with papers measuring other properties and nothing seeds the surrogate."""
+    return (metric_name or "").replace("_", " ").strip()
+
+
 def _linkage_query(linkage: str, target: Target) -> str:
     parts = [linkage, "covalent organic framework synthesis"]
     if target.functional_groups:
         parts.extend(target.functional_groups)
     if target.application and target.application.lower() not in ("general", ""):
         parts.append(target.application)
+    metric = _humanize_metric(target.metric_name)
+    if metric and metric.lower() not in ("general", "crystallinity"):
+        # Crystallinity is reported almost universally, so adding it doesn't narrow usefully; any
+        # other objective (BET surface area, CO2 uptake, ...) meaningfully focuses the search.
+        parts.append(metric)
     # Dedupe case-insensitively, preserving order -- functional groups often repeat the linkage
     # word (e.g. a "imine"-linkage target with "imine" also listed as a functional group).
     seen: set[str] = set()

@@ -194,3 +194,14 @@ def test_calibration_correction_noop_when_passing_or_insufficient():
     assert _calibration_correction(SimpleNamespace(passes=True, variance_scale=1.1, coverage_80=0.82)) == (1.0, "")
     assert _calibration_correction(SimpleNamespace(passes=None, variance_scale=None, coverage_80=None)) == (1.0, "")
     assert _calibration_correction(SimpleNamespace(passes=False, variance_scale=None, coverage_80=0.5)) == (1.0, "")
+
+
+def test_extrapolation_note_flags_out_of_range_only():
+    from types import SimpleNamespace
+    from materials_synthesis_agent.harness.tools import _extrapolation_note
+    obs = [SimpleNamespace(params={"temperature_c": 100.0}),
+           SimpleNamespace(params={"temperature_c": 120.0})]
+    specs = [{"name": "temperature_c", "kind": "continuous", "bounds": [20, 180]}]
+    assert "temperature_c" in _extrapolation_note({"temperature_c": 160.0}, obs, specs)  # above data
+    assert _extrapolation_note({"temperature_c": 110.0}, obs, specs) == ""               # within data
+    assert _extrapolation_note({"temperature_c": 160.0}, [], specs) == ""                # no data -> no claim

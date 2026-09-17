@@ -225,6 +225,29 @@ def _build_observations(ctx: ToolContext, space, objective_name: str):
     return [o for o in obs if plausible_outcome(objective_name, o.value)]
 
 
+def _extrapolation_note(params: dict, observations, specs: list[dict]) -> str:
+    """Flag when a suggestion's continuous parameters fall outside the range actually covered by the
+    data -- a boundary/extrapolated pick is legitimate BO exploration, but the user should know it's
+    a probe beyond the literature, not an interpolated optimum. Deterministic, not an LLM veto."""
+    if not observations:
+        return ""
+    beyond = []
+    for spec in specs:
+        if spec.get("kind") != "continuous":
+            continue
+        name = spec["name"]
+        seen = [o.params[name] for o in observations if name in o.params and isinstance(o.params[name], (int, float))]
+        if not seen or name not in params:
+            continue
+        val = params[name]
+        lo, hi = min(seen), max(seen)
+        if val < lo or val > hi:
+            beyond.append(f"{name}={val:.4g} (data {lo:.4g}-{hi:.4g})")
+    if beyond:
+        return "Exploring beyond the literature range: " + "; ".join(beyond) + " -- treat as a probe."
+    return ""
+
+
 def _calibration_correction(report) -> tuple[float, str]:
     """Decide the uncertainty correction from a calibration report. When the surrogate is measurably
     overconfident, return the recommended variance scale (and an explanatory note) so the harness can
@@ -299,7 +322,8 @@ def h_suggest_next(ctx: ToolContext) -> dict:
                          f"(+/- {suggestion.predicted_uncertainty:.4g})",
         followed_from=prev.id if prev else None,
     ))
-    rationale = suggestion.rationale + ((" " + calib_note) if calib_note else "")
+    extrap_note = _extrapolation_note(suggestion.params, obs, specs)
+    rationale = " ".join(x for x in (suggestion.rationale, calib_note, extrap_note) if x)
     return {
         "protocol_candidate_id": new_candidate.id,
         "params": suggestion.params,
@@ -310,6 +334,7 @@ def h_suggest_next(ctx: ToolContext) -> dict:
         "n_warm_anchors": len(anchors),
         "calibration_passed": report.passes,
         "applied_variance_scale": applied_scale,
+        "extrapolating": bool(extrap_note),
         "rationale": rationale,
     }
 
@@ -340,7 +365,8 @@ def h_lit_search(ctx: ToolContext, query: str, limit: int = 10) -> dict:
 
 
 def h_extract_protocols(
-    ctx: ToolContext, n: int = 10, search_limit: int = 40, require_full_text: bool = True
+    ctx: ToolContext, n: int = 10, search_limit: int = 40, require_full_text: bool = True,
+    target_experiments: int = 50,
 ) -> dict:
     """The extractor: search Semantic Scholar + OpenAlex (merged), fetch each paper's complete
     open-access PDF, extract citation-grounded candidate protocols and their experiments, save them,
@@ -363,6 +389,7 @@ def h_extract_protocols(
         target, n=n, client=ctx.llm, model=ctx.model,
         search_limit=min(max(1, search_limit), 100),   # search space up to 100 papers per tier
         require_full_text=require_full_text,            # only papers with a complete PDF
+        target_experiments=target_experiments,          # keep searching until >= this many on-metric
         unpaywall_email=ctx.unpaywall_email,
     )
     seedable_total = 0
@@ -457,7 +484,9 @@ TOOL_SPECS: list[dict] = [
                     "skips abstract-only papers.",
      "input_schema": {"type": "object", "properties": {
          "n": {"type": "integer"}, "search_limit": {"type": "integer"},
-         "require_full_text": {"type": "boolean"}}}},
+         "require_full_text": {"type": "boolean"},
+         "target_experiments": {"type": "integer",
+                                "description": "keep searching until this many on-metric data points"}}}},
     {"name": "feas.check",
      "description": "Check building-block validity and purchasability for a protocol.",
      "input_schema": {"type": "object", "properties": {
