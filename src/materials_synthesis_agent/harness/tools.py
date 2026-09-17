@@ -186,17 +186,25 @@ def _build_observations(ctx: ToolContext, space, objective_name: str):
     lets the GP propose a *first* protocol from the papers' real data before any bench result exists;
     the user-logged experiments are added as they come in on each rerun of the loop."""
     from materials_synthesis_agent.cli.params import protocol_to_params
-    from materials_synthesis_agent.literature.outcomes import selected_experiments_to_observations
+    from materials_synthesis_agent.literature.outcomes import (
+        outcomes_to_observations,
+        selected_experiments_to_observations,
+    )
     from materials_synthesis_agent.optimize import Observation
 
     target_id = ctx.campaign.target_id
     candidates = {c.id: c for c in ctx.store.list_protocol_candidates(target_id)}
 
     obs = []
-    # 1. Literature-seeded observations: the paper's real (conditions -> outcome) data points, for
-    #    every extracted experiment the extractor marked as matching this objective.
+    # 1. Literature-seeded observations: the paper's real (conditions -> outcome) data points.
+    #    Two sources, both metric-matched and both mapped by outcomes.py's tolerant parser:
+    #    (a) optimization-table rows the extractor marked for seeding, and (b) a single headline
+    #    measured value reported alongside the protocol's base conditions. Many COF papers report
+    #    only the latter, so seeding from experiments alone leaves the GP empty (see the live smoke
+    #    test) -- including measured_outcomes recovers those single-point papers.
     for cand in candidates.values():
         obs.extend(selected_experiments_to_observations(cand, space, objective_name))
+        obs.extend(outcomes_to_observations(cand, space, objective_name))
 
     # 2. User-logged bench results (accumulate across reruns of the loop).
     for exp in ctx.store.list_experiments(target_id):

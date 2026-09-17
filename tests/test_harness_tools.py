@@ -142,3 +142,39 @@ def test_suggest_next_observations_seed_from_literature(tmp_path):
     assert len(obs) == 2                       # both literature rows became observations
     assert {round(o.value, 2) for o in obs} == {0.65, 0.82}
     ctx.store.close(); ctx.prior_store.close()
+
+
+def test_suggest_next_observations_seed_from_single_measured_outcomes(tmp_path):
+    """Most COF papers report a single headline value (a measured_outcome), not an optimization
+    table. Those must seed the GP too -- the live smoke test showed experiment-only seeding leaves
+    it empty. Here two candidates each report a BET value at clean conditions -> two observations."""
+    from materials_synthesis_agent.harness.tools import _build_observations, _build_parameter_space
+    from materials_synthesis_agent.schema import MeasuredOutcome
+
+    ctx, target, _ = _ctx(tmp_path)  # target metric is "crystallinity"; use a BET campaign here
+    # Re-point the campaign's target metric to BET for this test.
+    bet_target = Target(
+        name="COF-BET", functional_groups=["amine", "aldehyde"], linkage_chemistry="imine",
+        application="gas storage", metric_name="BET_surface_area",
+        metric_measurement_method="N2 adsorption",
+    )
+    ctx.store.save_target(bet_target)
+    ctx.campaign.target_id = bet_target.id
+    ctx.store.save_campaign(ctx.campaign)
+
+    for temp, bet in [("120", 1457.0), ("90", 800.0)]:
+        c = ProtocolCandidate(
+            target_id=bet_target.id, source=ProtocolSource.LITERATURE,
+            building_blocks={"BB": FieldValue(value="Nc1ccccc1", inferred=True)},
+            temperature_c=FieldValue(value=temp, inferred=True),
+            solvent=FieldValue(value="dioxane", inferred=True),
+            measured_outcomes=[MeasuredOutcome(metric_name="BET_surface_area", value=bet,
+                                               unit="m2/g", measurement_method="N2 adsorption")],
+        )
+        ctx.store.save_protocol_candidate(c)
+
+    space = _build_parameter_space(ctx.campaign.space["specs"])
+    obs = _build_observations(ctx, space, "BET_surface_area")
+    assert len(obs) == 2
+    assert {round(o.value) for o in obs} == {1457, 800}
+    ctx.store.close(); ctx.prior_store.close()
