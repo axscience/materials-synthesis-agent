@@ -305,11 +305,16 @@ def h_lit_search(ctx: ToolContext, query: str, limit: int = 10) -> dict:
     ]}
 
 
-def h_extract_protocols(ctx: ToolContext, n: int = 5) -> dict:
-    """The extractor: pull N citation-grounded candidate protocols (with their literature
-    experiments) from the papers, save them, and mark the experiments whose outcome metric matches
-    this campaign's objective as seeds for the optimizer -- so opt.suggest_next can propose a first
-    protocol from the papers' real data with no bench result yet."""
+def h_extract_protocols(
+    ctx: ToolContext, n: int = 10, search_limit: int = 40, require_full_text: bool = True
+) -> dict:
+    """The extractor: search Semantic Scholar + OpenAlex (merged), fetch each paper's complete
+    open-access PDF, extract citation-grounded candidate protocols and their experiments, save them,
+    and mark the experiments/outcomes matching this campaign's objective to seed the optimizer -- so
+    opt.suggest_next can propose a first protocol from the papers' real data with no bench result.
+
+    `search_limit` is papers per search tier (capped at 100). `require_full_text=True` skips papers
+    without a fetchable complete PDF -- abstracts rarely carry the numeric conditions the GP needs."""
     if ctx.llm is None:
         raise ToolError("Extraction needs an LLM client -- set ANTHROPIC_API_KEY so the harness "
                         "can run the extractor.")
@@ -321,7 +326,10 @@ def h_extract_protocols(ctx: ToolContext, n: int = 5) -> dict:
     from materials_synthesis_agent.literature.outcomes import _metric_matches
 
     candidates = generate_protocols(
-        target, n=n, client=ctx.llm, model=ctx.model, unpaywall_email=ctx.unpaywall_email,
+        target, n=n, client=ctx.llm, model=ctx.model,
+        search_limit=min(max(1, search_limit), 100),   # search space up to 100 papers per tier
+        require_full_text=require_full_text,            # only papers with a complete PDF
+        unpaywall_email=ctx.unpaywall_email,
     )
     seedable_total = 0
     summary = []
@@ -408,10 +416,14 @@ TOOL_SPECS: list[dict] = [
      "input_schema": {"type": "object", "properties": {
          "query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}},
     {"name": "lit.extract_protocols",
-     "description": "Extract N citation-grounded candidate protocols and their experiments from the "
-                    "papers, and seed the optimizer with the experiments matching the objective. Run "
-                    "this before opt.suggest_next on a fresh campaign so the GP has data to start from.",
-     "input_schema": {"type": "object", "properties": {"n": {"type": "integer"}}}},
+     "description": "Search Semantic Scholar + OpenAlex (merged), fetch complete open-access PDFs, "
+                    "and extract N citation-grounded candidate protocols and experiments, seeding the "
+                    "optimizer with the ones matching the objective. Run before opt.suggest_next on a "
+                    "fresh campaign. search_limit is papers per tier (up to 100); require_full_text "
+                    "skips abstract-only papers.",
+     "input_schema": {"type": "object", "properties": {
+         "n": {"type": "integer"}, "search_limit": {"type": "integer"},
+         "require_full_text": {"type": "boolean"}}}},
     {"name": "feas.check",
      "description": "Check building-block validity and purchasability for a protocol.",
      "input_schema": {"type": "object", "properties": {

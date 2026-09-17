@@ -185,3 +185,27 @@ def test_search_falls_back_to_arxiv_when_both_semantic_scholar_and_openalex_fail
     with patch("materials_synthesis_agent.literature.retrieval.requests.get", side_effect=fake_get):
         papers = search("x", limit=5)
     assert papers == []  # empty feed, but no exception -- confirms arxiv was actually reached
+
+
+def test_search_merges_semantic_scholar_and_openalex_deduped_by_doi():
+    """search() now MERGES both sources (not fallback-only): the same paper (shared DOI) appears
+    once, and a paper unique to OpenAlex is included alongside the Semantic Scholar results."""
+    from unittest.mock import patch as _patch
+    from materials_synthesis_agent.literature.retrieval import Paper, search as _search
+
+    a_s2 = Paper(source_id="10.1/a", title="Alpha COF", abstract=None, year=2024, url="",
+                 source="semantic_scholar", oa_pdf_url="s2.pdf")
+    a_oa = Paper(source_id="10.1/a", title="Alpha COF", abstract=None, year=2024, url="",
+                 source="openalex", oa_pdf_url="oa.pdf")   # same DOI -> duplicate
+    b_oa = Paper(source_id="10.1/b", title="Beta COF", abstract=None, year=2024, url="",
+                 source="openalex", oa_pdf_url=None)
+
+    with _patch("materials_synthesis_agent.literature.retrieval.search_semantic_scholar",
+                return_value=[a_s2]), \
+         _patch("materials_synthesis_agent.literature.retrieval.search_openalex",
+                return_value=[a_oa, b_oa]):
+        papers = _search("cof", limit=10)
+
+    assert [p.source_id for p in papers] == ["10.1/a", "10.1/b"]   # deduped, order preserved
+    assert papers[0].source == "semantic_scholar"                   # S2 copy kept for the shared DOI
+    assert {p.title for p in papers} == {"Alpha COF", "Beta COF"}

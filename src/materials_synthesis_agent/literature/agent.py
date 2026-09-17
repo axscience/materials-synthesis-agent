@@ -73,15 +73,23 @@ def _extract_tier(
     search_limit: int,
     use_full_text: bool,
     unpaywall_email: Optional[str],
+    require_full_text: bool = False,
 ) -> list[ProtocolCandidate]:
     """Search one tier and extract up to `need` protocols from it, tagging each with the tier's
-    provenance (so a related-linkage candidate is clearly marked a weaker prior)."""
+    provenance (so a related-linkage candidate is clearly marked a weaker prior).
+
+    With `require_full_text=True`, papers whose complete open-access PDF (main text / SI) can't be
+    fetched are skipped entirely rather than extracted from their abstract -- abstracts give building
+    blocks but rarely the numeric conditions/outcomes the GP needs, so this trades quantity for the
+    data quality that actually seeds the optimizer."""
     papers = search(tier.query, limit=search_limit)
     out: list[ProtocolCandidate] = []
     for paper in papers:
         if len(out) >= need:
             break
         excerpt = _resolve_excerpt(paper, use_full_text, unpaywall_email)
+        if require_full_text and not excerpt:
+            continue  # no complete PDF -> skip; don't extract from an abstract
         result = extract_protocol(target, paper, client=client, model=model, dry_run=False, full_text_excerpt=excerpt)
         if result is not None:
             note = f"Extracted from literature on {tier.label}."
@@ -175,6 +183,7 @@ def generate_protocols(
     use_full_text: bool = True,
     unpaywall_email: Optional[str] = None,
     confirm_expand: Optional[Callable[[list[str]], bool]] = None,
+    require_full_text: bool = False,
 ) -> list[ProtocolCandidate]:
     """Search for papers relevant to `target` and return up to `n` deduplicated candidate protocols,
     proceeding hierarchically by linkage chemistry (see module docstring).
@@ -213,7 +222,8 @@ def generate_protocols(
                 if confirm_expand is None or not confirm_expand(alternatives):
                     break
         tier_results = _extract_tier(
-            target, tier, per_tier_extract, client, model, per_tier_limit, use_full_text, unpaywall_email,
+            target, tier, per_tier_extract, client, model, per_tier_limit, use_full_text,
+            unpaywall_email, require_full_text=require_full_text,
         )
         candidates.extend(tier_results)
         logger.info("Tier '%s': extracted %d protocols (%d total so far)", tier.label, len(tier_results), len(candidates))

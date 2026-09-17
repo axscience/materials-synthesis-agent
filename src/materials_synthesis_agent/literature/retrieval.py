@@ -1,9 +1,13 @@
-"""Literature retrieval -- Semantic Scholar (primary), OpenAlex (fallback), arXiv (last resort).
+"""Literature retrieval -- Semantic Scholar + OpenAlex MERGED, arXiv as last resort.
+
+`search()` queries Semantic Scholar and OpenAlex and merges the results (deduplicated by DOI/title):
+both are real, independent sources with complementary coverage, so querying both widens the corpus
+the extractor draws full-text protocols from. arXiv runs only if both come up empty.
 
 All three are free, keyless APIs. Semantic Scholar's unauthenticated rate limit is very low
 (observed 429s in normal use without a key) -- callers should expect to need
 `SEMANTIC_SCHOLAR_API_KEY` for anything beyond light interactive use; this module degrades to a
-clear error, not a silent empty result, when rate-limited. OpenAlex is tried next -- confirmed
+clear error, not a silent empty result, when rate-limited. OpenAlex is merged in -- confirmed
 directly (not assumed) to return real, relevant results with no key at all, full-text search
 included, via its "polite pool" (a `mailto` param gets a higher, documented rate limit -- see
 https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication). arXiv is the last
@@ -14,6 +18,7 @@ not a chemistry-journal index), so it only runs if both real literature APIs are
 from __future__ import annotations
 
 import os
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -183,18 +188,55 @@ def resolve_oa_pdf_url_via_unpaywall(doi: str, email: Optional[str] = None, time
     return best.get("url_for_pdf")
 
 
-def search(query: str, limit: int = 10, semantic_scholar_api_key: Optional[str] = None) -> list[Paper]:
-    """Search Semantic Scholar first (broader coverage of chemistry journals), fall back to
-    OpenAlex if Semantic Scholar is rate-limited, then arXiv as a last resort if OpenAlex's request
-    itself fails outright (a real network/HTTP error, not just an empty result -- an empty result
-    is a real "no papers found," not something to escalate past). Each fallback is a real,
-    independent literature source, not a silent empty result standing in for one."""
-    try:
-        return search_semantic_scholar(query, limit=limit, api_key=semantic_scholar_api_key)
-    except RateLimitedError:
-        pass
+def _dedup_key(paper: Paper) -> str:
+    """Identity for cross-source deduplication: a DOI when we have one (the same paper on Semantic
+    Scholar and OpenAlex shares its DOI), else a normalized title."""
+    sid = (paper.source_id or "").strip().lower()
+    if sid.startswith("10."):  # a DOI
+        return "doi:" + sid
+    title = re.sub(r"[^a-z0-9]", "", (paper.title or "").lower())
+    return ("title:" + title) if title else ("id:" + sid)
+
+
+def search(
+    query: str,
+    limit: int = 10,
+    semantic_scholar_api_key: Optional[str] = None,
+    mailto: Optional[str] = None,
+) -> list[Paper]:
+    """Search Semantic Scholar AND OpenAlex and MERGE the results, deduplicated by DOI/title -- both
+    are real, independent literature sources with complementary coverage (S2 is broad on chemistry
+    journals; OpenAlex has strong open-access PDF links), so querying both widens the corpus the
+    extractor can draw full-text protocols from. Each source's failure (a Semantic Scholar rate
+    limit, an OpenAlex network error) is tolerated -- it just contributes nothing. arXiv is queried
+    only as a last resort, when both primary sources yield nothing at all.
+
+    Order is preserved source-first (Semantic Scholar results, then OpenAlex papers not already
+    seen), and the merged list is capped at `limit`."""
+    results: list[Paper] = []
+    seen: set[str] = set()
+
+    def _add(papers: list[Paper]) -> None:
+        for p in papers:
+            key = _dedup_key(p)
+            if key not in seen:
+                seen.add(key)
+                results.append(p)
 
     try:
-        return search_openalex(query, limit=limit)
+        _add(search_semantic_scholar(query, limit=limit, api_key=semantic_scholar_api_key))
+    except RateLimitedError:
+        pass  # S2 rate-limited -> rely on OpenAlex
+
+    try:
+        _add(search_openalex(query, limit=limit, mailto=mailto))
     except requests.RequestException:
-        return search_arxiv(query, limit=limit)
+        pass  # OpenAlex unreachable -> S2 results (if any) still stand
+
+    if not results:  # both primary sources came up empty -> last-resort preprint search
+        try:
+            _add(search_arxiv(query, limit=limit))
+        except requests.RequestException:
+            pass
+
+    return results[:limit]
