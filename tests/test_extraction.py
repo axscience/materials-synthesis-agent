@@ -133,3 +133,32 @@ def test_estimate_extraction_cost_with_full_text_reflects_the_larger_prompt():
     abstract_only = estimate_extraction_cost(target, paper)
     with_full_text = estimate_extraction_cost(target, paper, full_text_excerpt="x" * 5000)
     assert with_full_text > abstract_only
+
+
+def test_extract_protocol_skips_malformed_outcomes_instead_of_crashing():
+    """A many-paper run must survive a model that returns an outcome as a bare string, or an
+    experiment whose outcome is malformed -- skip the bad entries, keep the good ones, never crash.
+    (Regression: a live 50-paper run aborted on `'str'.get('excerpt')`.)"""
+    target, paper = make_target(), make_paper()
+    tool_input = {
+        "found_protocol": True,
+        "building_blocks": {"TAPB": {"value": "SMILES1", "excerpt": "TAPB node", "inferred": False}},
+        "measured_outcomes": [
+            "BET surface area was high",                      # bare string -> skip
+            {"metric_name": "BET_surface_area"},              # missing value/unit/method -> skip
+            {"metric_name": "BET_surface_area", "value": 1457, "unit": "m2/g",
+             "measurement_method": "N2 adsorption", "excerpt": "BET 1457 m2/g", "inferred": False},  # good
+        ],
+        "experiments": [
+            {"label": "row1", "conditions": {}, "outcome": "not a dict"},                    # skip
+            {"label": "row2", "conditions": {},
+             "outcome": {"metric_name": "BET_surface_area", "value": 800, "unit": "m2/g",
+                         "measurement_method": "N2", "excerpt": "800", "inferred": False}},  # good
+        ],
+    }
+    candidate = extract_protocol(target, paper, client=FakeClient(tool_input))
+    assert candidate is not None
+    assert len(candidate.measured_outcomes) == 1
+    assert candidate.measured_outcomes[0].value == 1457
+    assert len(candidate.literature_experiments) == 1
+    assert candidate.literature_experiments[0].outcome.value == 800

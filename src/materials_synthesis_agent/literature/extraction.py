@@ -478,39 +478,54 @@ def extract_protocol(
     def _dict_fields(key: str) -> dict[str, FieldValue]:
         return {name: fv for name, raw in (data.get(key) or {}).items() if (fv := _field_value(raw, paper))}
 
-    def _parse_outcome(raw: dict) -> MeasuredOutcome:
+    def _parse_outcome(raw) -> Optional[MeasuredOutcome]:
+        # Defensive: the model occasionally returns an outcome as a bare string or with a missing/
+        # non-numeric value even under forced tool-use. Skip such entries (return None) rather than
+        # crash -- across a many-paper run one malformed outcome must not abort the whole extraction.
+        if not isinstance(raw, dict):
+            return None
+        if any(raw.get(k) is None for k in ("metric_name", "unit", "measurement_method")):
+            return None
+        try:
+            value = float(raw["value"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        try:
+            uncertainty = float(raw["uncertainty"]) if raw.get("uncertainty") is not None else None
+        except (TypeError, ValueError):
+            uncertainty = None
         excerpt = raw.get("excerpt")
         inferred = bool(raw.get("inferred", False))
         citation = None if inferred and not excerpt else Citation(
             source_id=paper.source_id, title=paper.title, excerpt=excerpt,
         )
         return MeasuredOutcome(
-            metric_name=raw["metric_name"],
-            value=float(raw["value"]),
-            unit=raw["unit"],
-            uncertainty=float(raw["uncertainty"]) if raw.get("uncertainty") is not None else None,
-            measurement_method=raw["measurement_method"],
-            citation=citation,
-            inferred=inferred and not excerpt,
+            metric_name=raw["metric_name"], value=value, unit=raw["unit"],
+            uncertainty=uncertainty, measurement_method=raw["measurement_method"],
+            citation=citation, inferred=inferred and not excerpt,
         )
 
-    def _parse_outcomes(raw_list: list[dict] | None) -> list[MeasuredOutcome]:
-        return [_parse_outcome(raw) for raw in (raw_list or [])]
+    def _parse_outcomes(raw_list) -> list[MeasuredOutcome]:
+        if not isinstance(raw_list, list):
+            return []
+        return [o for raw in raw_list if (o := _parse_outcome(raw)) is not None]
 
-    def _parse_experiments(raw_list: list[dict] | None) -> list[LiteratureExperiment]:
+    def _parse_experiments(raw_list) -> list[LiteratureExperiment]:
         experiments = []
-        for raw in raw_list or []:
-            raw_outcome = raw.get("outcome")
-            if not raw_outcome or raw_outcome.get("value") is None:
-                continue  # an experiment with no measured outcome isn't a usable data point
+        if not isinstance(raw_list, list):
+            return experiments
+        for raw in raw_list:
+            if not isinstance(raw, dict):
+                continue
+            outcome = _parse_outcome(raw.get("outcome"))
+            if outcome is None:
+                continue  # an experiment with no usable measured outcome isn't a data point
             conditions = {
                 name: fv for name, cond in (raw.get("conditions") or {}).items()
                 if (fv := _field_value(cond, paper)) is not None
             }
             experiments.append(LiteratureExperiment(
-                label=raw.get("label"),
-                conditions=conditions,
-                outcome=_parse_outcome(raw_outcome),
+                label=raw.get("label"), conditions=conditions, outcome=outcome,
             ))
         return experiments
 
