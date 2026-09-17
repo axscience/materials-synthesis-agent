@@ -72,27 +72,36 @@ def derive_parameter_space(
     continuous_values: dict[str, list[float]] = {k: [] for k in _CONTINUOUS_FIELDS}
     categorical_values: dict[str, set[str]] = {k: set() for k in _CATEGORICAL_FIELDS}
 
+    from materials_synthesis_agent.literature.normalize import (
+        canonicalize_category,
+        parse_quantity,
+    )
+
     for p in protocols:
         for field_name in _CONTINUOUS_FIELDS:
             fv = getattr(p, field_name, None)
             if fv is not None:
-                num = _parse_numeric(fv.value)
+                num = parse_quantity(fv.value, field_name)
                 if num is not None:
                     continuous_values[field_name].append(num)
 
         for exp in p.literature_experiments:
             for cond_name, cond_fv in exp.conditions.items():
                 if cond_name in continuous_values:
-                    num = _parse_numeric(cond_fv.value)
+                    num = parse_quantity(cond_fv.value, cond_name)
                     if num is not None:
                         continuous_values[cond_name].append(num)
                 elif cond_name in categorical_values:
-                    categorical_values[cond_name].add(_normalize_category(cond_fv.value))
+                    canon = canonicalize_category(cond_name, cond_fv.value)
+                    if canon is not None:
+                        categorical_values[cond_name].add(canon)
 
         for field_name in _CATEGORICAL_FIELDS:
             fv = getattr(p, field_name, None)
             if fv is not None:
-                categorical_values[field_name].add(_normalize_category(fv.value))
+                canon = canonicalize_category(field_name, fv.value)
+                if canon is not None:  # unrecognized/not-stated -> not a category
+                    categorical_values[field_name].add(canon)
 
     specs: list[ParameterSpec] = []
     for field_name, (abs_lo, abs_hi) in _CONTINUOUS_FIELDS.items():

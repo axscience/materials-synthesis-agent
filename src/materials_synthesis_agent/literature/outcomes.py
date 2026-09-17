@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from materials_synthesis_agent.literature.normalize import canonicalize_category, parse_quantity
 from materials_synthesis_agent.optimize.space import ParameterSpace, ParamValue
 from materials_synthesis_agent.optimize.single_objective import Observation
 from materials_synthesis_agent.schema import MeasuredOutcome, ProtocolCandidate
@@ -23,37 +24,28 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_param_value(candidate: ProtocolCandidate, param_name: str) -> Optional[ParamValue]:
-    """Try to read a named parameter from a ProtocolCandidate's fields. Returns None if the
-    field is absent or its value can't be interpreted as the expected type."""
-    field_map = {
+    """Read a named parameter off a ProtocolCandidate and normalize it: a float for continuous
+    params (unit-aware), a canonical token for categorical params, or None when the field is absent,
+    not stated, or an unresolved sweep. All parsing goes through `normalize`, so what this returns
+    matches the categories `derive_parameter_space` produces (which route through the same module)."""
+    continuous = {
         "temperature_c": candidate.temperature_c,
         "time_hours": candidate.time_hours,
         "concentration_molar": candidate.concentration_molar,
         "monomer_concentration_M": candidate.concentration_molar,
     }
-    fv = field_map.get(param_name)
-    if fv is not None:
-        try:
-            return float(fv.value.split()[0].rstrip("°CcMm%"))
-        except (ValueError, IndexError):
+    if param_name in continuous:
+        fv = continuous[param_name]
+        if fv is None:
             return None
+        kind = "concentration_molar" if "concentration" in param_name else param_name
+        return parse_quantity(fv.value, kind)
 
-    if param_name == "acoh_concentration_M" and candidate.modulator:
-        val = candidate.modulator.value
-        for token in val.replace(",", " ").split():
-            try:
-                num = float(token.rstrip("Mm"))
-                if 0.1 <= num <= 20:
-                    return num
-            except ValueError:
-                continue
-        return None
-
-    for field_name in ["solvent", "catalyst", "modulator", "synthesis_method",
-                       "atmosphere", "activation_method"]:
-        fv = getattr(candidate, field_name, None)
-        if fv is not None and param_name.startswith(field_name):
-            return fv.value
+    for field_name in ("solvent", "catalyst", "modulator", "synthesis_method",
+                       "atmosphere", "activation_method"):
+        if param_name.startswith(field_name):
+            fv = getattr(candidate, field_name, None)
+            return canonicalize_category(field_name, fv.value) if fv is not None else None
 
     return None
 
@@ -85,12 +77,9 @@ def protocol_to_params(
             params[spec.name] = max(lo, min(hi, num))
 
         elif spec.kind == "categorical":
-            str_val = str(value).lower().replace(" ", "_").replace("/", "/")
-            matched = None
-            for cat in spec.categories:
-                if cat.lower() == str_val or str_val in cat.lower() or cat.lower() in str_val:
-                    matched = cat
-                    break
+            # `value` is already a canonical token (from _extract_param_value); match it exactly
+            # against the space's canonical categories.
+            matched = next((c for c in spec.categories if c.lower() == str(value).lower()), None)
             if matched:
                 params[spec.name] = matched
             else:
@@ -115,20 +104,19 @@ def protocol_to_params(
 
 
 def _coerce_to_spec(spec, value) -> Optional[ParamValue]:
-    """Map a single free-text value onto one ParameterSpec (continuous clamp / categorical match),
-    or None if it doesn't fit -- the same logic protocol_to_params applies per parameter."""
+    """Map a single free-text value (from an experiment's conditions) onto one ParameterSpec, via
+    the shared normalizer so a swept/not-stated value becomes None rather than a fabricated point."""
     if spec.kind == "continuous":
-        try:
-            num = float(value)
-        except (ValueError, TypeError):
+        kind = spec.name if spec.name in ("temperature_c", "time_hours", "concentration_molar") else "generic"
+        num = parse_quantity(str(value), kind)
+        if num is None:
             return None
         lo, hi = spec.bounds
         return max(lo, min(hi, num))
-    str_val = str(value).lower()
-    for cat in spec.categories:
-        if cat.lower() == str_val or str_val in cat.lower() or cat.lower() in str_val:
-            return cat
-    return None
+    canon = canonicalize_category(spec.name, str(value))
+    if canon is None:
+        return None
+    return next((c for c in spec.categories if c.lower() == canon.lower()), None)
 
 
 def _metric_matches(metric_name: str, target_metric: str) -> bool:
