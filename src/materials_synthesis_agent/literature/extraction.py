@@ -13,12 +13,15 @@ confirmed before anything is spent.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from materials_synthesis_agent.literature.retrieval import Paper
 from materials_synthesis_agent.llm import LLMClient, PROVIDERS
 from materials_synthesis_agent.llm.pricing import estimate_cost_usd
 from materials_synthesis_agent.schema import Citation, FieldValue, LiteratureExperiment, MeasuredOutcome, ProtocolCandidate, ProtocolSource, Target
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = PROVIDERS["anthropic"].default_model  # kept for backwards-compatible callers
 
@@ -558,3 +561,65 @@ def extract_protocol(
         measured_outcomes=_parse_outcomes(data.get("measured_outcomes")),
         literature_experiments=_parse_experiments(data.get("experiments")),
     )
+
+
+# Scalar synthesis-condition fields worth a targeted second pass when the first extraction left
+# them blank (the recipe-defining ones -- not building blocks or free-text notes).
+_REFINABLE_FIELDS = (
+    "synthesis_method", "solvent", "catalyst", "modulator", "temperature_c", "time_hours",
+    "concentration_molar", "atmosphere", "activation_method", "yield_percent",
+)
+
+
+def refine_protocol(
+    candidate: ProtocolCandidate,
+    target: Target,
+    paper: Paper,
+    client: Optional[LLMClient] = None,
+    model: Optional[str] = None,
+    full_text_excerpt: Optional[str] = None,
+) -> ProtocolCandidate:
+    """Second extraction pass: for the recipe fields the first pass left blank, re-ask the model to
+    find ONLY those in the full text. Two focused passes beat one -- the first pass spreads attention
+    across the whole schema; this one hunts specifically for the gaps (often buried in the SI). A
+    no-op when there's no client, no full text, or nothing missing. Only fills blanks; never
+    overwrites a value the first pass already grounded."""
+    missing = [f for f in _REFINABLE_FIELDS if getattr(candidate, f, None) is None]
+    if not missing or client is None or not full_text_excerpt:
+        return candidate
+
+    schema = {
+        "type": "object",
+        "properties": {f: _FIELD_SCHEMA for f in missing},
+        "required": [],
+    }
+    prompt = (
+        "You previously extracted a synthesis protocol from this paper, but these fields were left "
+        f"blank: {', '.join(missing)}.\n\nFrom the full text below (which may include the "
+        "Supplementary Information, where exact conditions often live), extract ONLY those fields. "
+        "Ground each in an exact excerpt, or set inferred=true if you reason it rather than read it. "
+        "Omit a field entirely if the text genuinely does not state it -- do not guess a placeholder.\n\n"
+        f"--- PAPER TEXT ---\n{full_text_excerpt}"
+    )
+    try:
+        data = client.call_tool(
+            prompt=prompt, tool_name="record_missing_fields",
+            tool_description="Record only the previously-missing synthesis-condition fields.",
+            tool_schema=schema,
+        )
+    except Exception as exc:  # noqa: BLE001 -- a refine failure must never lose the first-pass result
+        logger.warning("refine_protocol failed for %s: %s", paper.source_id, exc)
+        return candidate
+
+    if not isinstance(data, dict):
+        return candidate
+    filled = 0
+    for field in missing:
+        fv = _field_value(data.get(field), paper)
+        if fv is not None:
+            setattr(candidate, field, fv)
+            filled += 1
+    if filled:
+        logger.info("refine_protocol filled %d/%d missing fields for %s",
+                    filled, len(missing), paper.source_id)
+    return candidate

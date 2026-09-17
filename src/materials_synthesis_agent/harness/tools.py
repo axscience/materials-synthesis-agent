@@ -105,6 +105,39 @@ def h_setup_space(ctx: ToolContext, specs: list[dict]) -> dict:
     return {"dim": len(specs), "parameters": [s["name"] for s in specs]}
 
 
+def _space_to_specs(space) -> list[dict]:
+    """ParameterSpace -> the specs-dict form the campaign stores (inverse of _build_parameter_space)."""
+    specs = []
+    for s in space.specs:
+        d = {"name": s.name, "kind": s.kind}
+        if s.kind == "continuous":
+            d["bounds"] = [float(s.bounds[0]), float(s.bounds[1])]
+        else:
+            d["categories"] = list(s.categories)
+        specs.append(d)
+    return specs
+
+
+def h_derive_space(ctx: ToolContext) -> dict:
+    """Build the optimizer's parameter space from the conditions actually reported across the
+    extracted protocols, so BO only searches dimensions and ranges the literature can seed -- rather
+    than a hand-guessed space with parameters no paper quantifies."""
+    target = ctx.store.get_target(ctx.campaign.target_id) if ctx.campaign.target_id else None
+    if target is None:
+        raise ToolError("Campaign has no target yet.")
+    from materials_synthesis_agent.literature import derive_parameter_space
+
+    candidates = ctx.store.list_protocol_candidates(target.id)
+    space = derive_parameter_space(candidates)
+    if space is None:
+        raise ToolError("Not enough extracted protocols with conditions to derive a space "
+                        "(need >= 2). Run lit.extract_protocols first.")
+    specs = _space_to_specs(space)
+    ctx.campaign.space = {"specs": specs}
+    ctx.store.save_campaign(ctx.campaign)
+    return {"dim": len(specs), "parameters": [s["name"] for s in specs], "specs": specs}
+
+
 def h_warm_prior(ctx: ToolContext) -> dict:
     """Query the cross-campaign prior for this campaign's chemistry + metric."""
     target = ctx.store.get_target(ctx.campaign.target_id) if ctx.campaign.target_id else None
@@ -390,6 +423,7 @@ def h_extract_protocols(
         search_limit=min(max(1, search_limit), 100),   # search space up to 100 papers per tier
         require_full_text=require_full_text,            # only papers with a complete PDF
         target_experiments=target_experiments,          # keep searching until >= this many on-metric
+        refine=True,                                     # second pass to fill missing recipe fields
         unpaywall_email=ctx.unpaywall_email,
     )
     seedable_total = 0
@@ -435,6 +469,7 @@ def _design_unavailable(ctx: ToolContext, **_: Any) -> dict:
 
 HANDLERS: dict[str, Callable[..., dict]] = {
     "opt.setup_space": h_setup_space,
+    "opt.derive_space": h_derive_space,
     "opt.suggest_next": h_suggest_next,
     "opt.calibration_report": h_calibration_report,
     "data.warm_prior": h_warm_prior,
@@ -456,6 +491,11 @@ TOOL_SPECS: list[dict] = [
      "description": "Define the optimizer's search space (temperature, time, solvent, ...).",
      "input_schema": {"type": "object", "properties": {
          "specs": {"type": "array", "items": {"type": "object"}}}, "required": ["specs"]}},
+    {"name": "opt.derive_space",
+     "description": "Derive the parameter space from the conditions the extracted protocols actually "
+                    "report, so BO searches only dimensions/ranges the literature can seed. Run after "
+                    "lit.extract_protocols, as an alternative to hand-specifying opt.setup_space.",
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "opt.suggest_next",
      "description": "Propose the next experiment via Bayesian optimization over logged results. "
                     "BLOCKED if the surrogate's uncertainty is overconfident (calibration gate).",

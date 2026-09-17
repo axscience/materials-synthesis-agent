@@ -180,3 +180,46 @@ def test_extract_protocol_rejects_qualitative_outcomes():
     }
     candidate = extract_protocol(target, paper, client=FakeClient(tool_input))
     assert [o.metric_name for o in candidate.measured_outcomes] == ["BET_surface_area"]
+
+
+def test_refine_protocol_fills_missing_fields_without_overwriting():
+    from materials_synthesis_agent.literature.extraction import refine_protocol
+    from materials_synthesis_agent.schema import FieldValue, ProtocolCandidate, ProtocolSource
+    target, paper = make_target(), make_paper()
+    cand = ProtocolCandidate(
+        target_id=target.id, source=ProtocolSource.LITERATURE,
+        solvent=FieldValue(value="dioxane", inferred=True),  # already set (non-None)
+        temperature_c=None, time_hours=None,                                        # missing
+    )
+    # The refine pass finds the two missing fields in the full text.
+    refine_client = FakeClient({
+        "temperature_c": {"value": "120", "excerpt": "heated at 120 C", "inferred": False},
+        "time_hours": {"value": "72", "excerpt": "for 72 h", "inferred": False},
+    })
+    out = refine_protocol(cand, target, paper, client=refine_client, full_text_excerpt="…120 C… 72 h…")
+    assert out.temperature_c.value == "120"
+    assert out.time_hours.value == "72"
+    assert out.solvent.value == "dioxane"                 # untouched
+    # Only the missing fields were requested.
+    props = set(refine_client.last_call_kwargs["tool_schema"]["properties"])
+    assert {"temperature_c", "time_hours"} <= props   # missing fields requested
+    assert "solvent" not in props                     # already-set field not re-requested
+
+
+def test_refine_protocol_is_noop_without_client_or_missing():
+    from materials_synthesis_agent.literature.extraction import refine_protocol
+    from materials_synthesis_agent.schema import FieldValue, ProtocolCandidate, ProtocolSource
+    target, paper = make_target(), make_paper()
+    cand = ProtocolCandidate(target_id=target.id, source=ProtocolSource.LITERATURE, temperature_c=None)
+    # No client -> unchanged.
+    assert refine_protocol(cand, target, paper, client=None, full_text_excerpt="x").temperature_c is None
+    # Nothing missing (all refinable fields set) + a client that would error if called -> unchanged.
+    full = ProtocolCandidate(
+        target_id=target.id, source=ProtocolSource.LITERATURE,
+        **{f: FieldValue(value="v", inferred=True) for f in
+           ("synthesis_method", "solvent", "catalyst", "modulator", "temperature_c", "time_hours",
+            "concentration_molar", "atmosphere", "activation_method", "yield_percent")},
+    )
+    class _Boom:
+        def call_tool(self, **k): raise AssertionError("should not be called")
+    refine_protocol(full, target, paper, client=_Boom(), full_text_excerpt="x")  # no exception

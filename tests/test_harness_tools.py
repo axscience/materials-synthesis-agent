@@ -205,3 +205,29 @@ def test_extrapolation_note_flags_out_of_range_only():
     assert "temperature_c" in _extrapolation_note({"temperature_c": 160.0}, obs, specs)  # above data
     assert _extrapolation_note({"temperature_c": 110.0}, obs, specs) == ""               # within data
     assert _extrapolation_note({"temperature_c": 160.0}, [], specs) == ""                # no data -> no claim
+
+
+def test_derive_space_from_extracted_conditions(tmp_path):
+    """opt.derive_space builds the parameter space from what the protocols actually report."""
+    from materials_synthesis_agent.schema import FieldValue
+    ctx, target, _ = _ctx(tmp_path)
+    for temp, solv in [("100", "dioxane"), ("120", "mesitylene"), ("130", "dioxane")]:
+        ctx.store.save_protocol_candidate(ProtocolCandidate(
+            target_id=target.id, source=ProtocolSource.LITERATURE,
+            building_blocks={"BB": FieldValue(value="Nc1ccccc1", inferred=True)},
+            temperature_c=FieldValue(value=temp, inferred=True),
+            solvent=FieldValue(value=solv, inferred=True),
+        ))
+    out, gate = run_tool(ctx, "opt.derive_space", {})
+    assert gate.blocked is False
+    assert "temperature_c" in out["parameters"]
+    # The campaign now carries the derived space.
+    assert any(s["name"] == "temperature_c" for s in ctx.store.get_campaign(ctx.campaign.id).space["specs"])
+    ctx.store.close(); ctx.prior_store.close()
+
+
+def test_derive_space_errors_without_enough_protocols(tmp_path):
+    ctx, _, _ = _ctx(tmp_path)  # only the one fixture candidate, no conditions on it
+    with pytest.raises(ToolError):
+        run_tool(ctx, "opt.derive_space", {})
+    ctx.store.close(); ctx.prior_store.close()

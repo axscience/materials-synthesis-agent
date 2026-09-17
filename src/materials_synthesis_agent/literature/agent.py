@@ -74,6 +74,7 @@ def _extract_tier(
     use_full_text: bool,
     unpaywall_email: Optional[str],
     require_full_text: bool = False,
+    refine: bool = False,
 ) -> list[ProtocolCandidate]:
     """Search one tier and extract up to `need` protocols from it, tagging each with the tier's
     provenance (so a related-linkage candidate is clearly marked a weaker prior).
@@ -92,6 +93,10 @@ def _extract_tier(
             continue  # no complete PDF -> skip; don't extract from an abstract
         result = extract_protocol(target, paper, client=client, model=model, dry_run=False, full_text_excerpt=excerpt)
         if result is not None:
+            if refine and excerpt:
+                from materials_synthesis_agent.literature.extraction import refine_protocol
+                result = refine_protocol(result, target, paper, client=client, model=model,
+                                         full_text_excerpt=excerpt)
             note = f"Extracted from literature on {tier.label}."
             if tier.beyond_target_linkage:
                 note += (
@@ -198,6 +203,7 @@ def generate_protocols(
     confirm_expand: Optional[Callable[[list[str]], bool]] = None,
     require_full_text: bool = False,
     target_experiments: int = 0,
+    refine: bool = False,
 ) -> list[ProtocolCandidate]:
     """Search for papers relevant to `target` and return up to `n` deduplicated candidate protocols,
     proceeding hierarchically by linkage chemistry (see module docstring).
@@ -246,7 +252,7 @@ def generate_protocols(
                     break
         tier_results = _extract_tier(
             target, tier, per_tier_extract, client, model, per_tier_limit, use_full_text,
-            unpaywall_email, require_full_text=require_full_text,
+            unpaywall_email, require_full_text=require_full_text, refine=refine,
         )
         candidates.extend(tier_results)
         got = _count_on_metric(candidates, target.metric_name)
