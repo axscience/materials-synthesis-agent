@@ -156,7 +156,21 @@ def create_app(
         priors = _priors()
         session = (store.get_session(body.session_id) if body.session_id else None) \
             or Session(campaign_id=campaign_id)
-        ctx = ToolContext(store=store, prior_store=priors, campaign=campaign)
+        # Extraction runs an LLM (the Extractor role); give the context a client when a key is set.
+        # Design decision: closed model gets prompt-optimized use here; a fine-tuned extractor would
+        # slot in via the same build_client seam later.
+        llm = None
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        extract_model = os.environ.get("MATERIALS_AGENT_EXTRACT_MODEL", "claude-sonnet-4-6")
+        if key:
+            from materials_synthesis_agent.llm import build_client
+
+            llm = build_client("anthropic", key, extract_model)
+        ctx = ToolContext(
+            store=store, prior_store=priors, campaign=campaign,
+            llm=llm, model=extract_model,
+            unpaywall_email=os.environ.get("UNPAYWALL_EMAIL"),
+        )
         planner = Planner(ctx, caller_factory())
         reply = planner.respond(body.message, session)
         idx = _index(); idx.save_campaign(campaign); idx.close()  # keep the sidebar fresh

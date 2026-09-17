@@ -181,13 +181,24 @@ def h_log_result(ctx: ToolContext, protocol_id: str, metrics: list[dict], notes:
 
 
 def _build_observations(ctx: ToolContext, space, objective_name: str):
-    """Observations for the optimizer, reusing the same construction the web/CLI front ends use."""
+    """Observations for the optimizer -- literature-seeded first, then user-logged, exactly as the
+    CLI's suggest-next does. The literature seeding (selected_experiments_to_observations) is what
+    lets the GP propose a *first* protocol from the papers' real data before any bench result exists;
+    the user-logged experiments are added as they come in on each rerun of the loop."""
     from materials_synthesis_agent.cli.params import protocol_to_params
+    from materials_synthesis_agent.literature.outcomes import selected_experiments_to_observations
     from materials_synthesis_agent.optimize import Observation
 
     target_id = ctx.campaign.target_id
     candidates = {c.id: c for c in ctx.store.list_protocol_candidates(target_id)}
+
     obs = []
+    # 1. Literature-seeded observations: the paper's real (conditions -> outcome) data points, for
+    #    every extracted experiment the extractor marked as matching this objective.
+    for cand in candidates.values():
+        obs.extend(selected_experiments_to_observations(cand, space, objective_name))
+
+    # 2. User-logged bench results (accumulate across reruns of the loop).
     for exp in ctx.store.list_experiments(target_id):
         cand = candidates.get(exp.protocol_candidate_id)
         metric = next((m for m in exp.metrics if m.name == objective_name), None)
@@ -286,6 +297,45 @@ def h_lit_search(ctx: ToolContext, query: str, limit: int = 10) -> dict:
     ]}
 
 
+def h_extract_protocols(ctx: ToolContext, n: int = 5) -> dict:
+    """The extractor: pull N citation-grounded candidate protocols (with their literature
+    experiments) from the papers, save them, and mark the experiments whose outcome metric matches
+    this campaign's objective as seeds for the optimizer -- so opt.suggest_next can propose a first
+    protocol from the papers' real data with no bench result yet."""
+    if ctx.llm is None:
+        raise ToolError("Extraction needs an LLM client -- set ANTHROPIC_API_KEY so the harness "
+                        "can run the extractor.")
+    target = ctx.store.get_target(ctx.campaign.target_id) if ctx.campaign.target_id else None
+    if target is None:
+        raise ToolError("Campaign has no target yet.")
+
+    from materials_synthesis_agent.literature import generate_protocols
+    from materials_synthesis_agent.literature.outcomes import _metric_matches
+
+    candidates = generate_protocols(
+        target, n=n, client=ctx.llm, model=ctx.model, unpaywall_email=ctx.unpaywall_email,
+    )
+    seedable_total = 0
+    summary = []
+    for c in candidates:
+        n_seed = 0
+        for exp in c.literature_experiments:
+            if _metric_matches(exp.outcome.metric_name, target.metric_name):
+                exp.selected_for_seeding = True  # auto-select matching experiments for GP seeding
+                n_seed += 1
+        seedable_total += n_seed
+        ctx.store.save_protocol_candidate(c)
+        summary.append({
+            "id": c.id,
+            "source": getattr(c.source, "value", str(c.source)),
+            "n_building_blocks": len(c.building_blocks or {}),
+            "n_experiments": len(c.literature_experiments),
+            "n_seedable": n_seed,
+        })
+    return {"n_candidates": len(candidates), "n_seedable_experiments": seedable_total,
+            "candidates": summary}
+
+
 def h_feasibility(ctx: ToolContext, protocol_id: str) -> dict:
     from materials_synthesis_agent.feasibility import check_protocol_candidate
 
@@ -313,6 +363,7 @@ HANDLERS: dict[str, Callable[..., dict]] = {
     "data.warm_prior": h_warm_prior,
     "store.log_result": h_log_result,
     "lit.search": h_lit_search,
+    "lit.extract_protocols": h_extract_protocols,
     "feas.check": h_feasibility,
     "design.generate_candidates": _design_unavailable,
     "design.handoff": _design_unavailable,
@@ -345,9 +396,14 @@ TOOL_SPECS: list[dict] = [
          "metrics": {"type": "array", "items": {"type": "object"}},
          "notes": {"type": "string"}}, "required": ["protocol_id", "metrics"]}},
     {"name": "lit.search",
-     "description": "Search the literature for relevant COF synthesis papers.",
+     "description": "Search the literature for relevant COF synthesis papers (metadata only).",
      "input_schema": {"type": "object", "properties": {
          "query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}},
+    {"name": "lit.extract_protocols",
+     "description": "Extract N citation-grounded candidate protocols and their experiments from the "
+                    "papers, and seed the optimizer with the experiments matching the objective. Run "
+                    "this before opt.suggest_next on a fresh campaign so the GP has data to start from.",
+     "input_schema": {"type": "object", "properties": {"n": {"type": "integer"}}}},
     {"name": "feas.check",
      "description": "Check building-block validity and purchasability for a protocol.",
      "input_schema": {"type": "object", "properties": {

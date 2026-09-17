@@ -96,3 +96,49 @@ def test_unknown_tool_raises_keyerror(tmp_path):
     with pytest.raises(KeyError):
         run_tool(ctx, "nope.nonexistent", {})
     ctx.store.close(); ctx.prior_store.close()
+
+
+def test_extract_protocols_requires_llm_client(tmp_path):
+    ctx, _, _ = _ctx(tmp_path)  # ctx.llm is None
+    with pytest.raises(ToolError):
+        run_tool(ctx, "lit.extract_protocols", {"n": 3})
+    ctx.store.close(); ctx.prior_store.close()
+
+
+def test_suggest_next_observations_seed_from_literature(tmp_path):
+    """The extractor's experiments seed the GP: with 2 selected literature experiments and NO
+    user-logged results, the optimizer still has 2 observations to start from -- this is what lets
+    it propose a first protocol from the papers' real data."""
+    from materials_synthesis_agent.harness.tools import _build_observations, _build_parameter_space
+    from materials_synthesis_agent.schema import LiteratureExperiment, MeasuredOutcome
+
+    ctx, target, _ = _ctx(tmp_path)
+    lit = ProtocolCandidate(
+        target_id=target.id, source=ProtocolSource.LITERATURE,
+        building_blocks={"TAPB": FieldValue(value="Nc1ccccc1", inferred=True)},
+        literature_experiments=[
+            LiteratureExperiment(
+                label="row1",
+                conditions={"temperature_c": FieldValue(value="120", inferred=True),
+                            "solvent": FieldValue(value="dioxane", inferred=True)},
+                outcome=MeasuredOutcome(metric_name="crystallinity", value=0.65, unit="ratio",
+                                        measurement_method="PXRD"),
+                selected_for_seeding=True,
+            ),
+            LiteratureExperiment(
+                label="row2",
+                conditions={"temperature_c": FieldValue(value="130", inferred=True),
+                            "solvent": FieldValue(value="dioxane", inferred=True)},
+                outcome=MeasuredOutcome(metric_name="crystallinity", value=0.82, unit="ratio",
+                                        measurement_method="PXRD"),
+                selected_for_seeding=True,
+            ),
+        ],
+    )
+    ctx.store.save_protocol_candidate(lit)
+
+    space = _build_parameter_space(ctx.campaign.space["specs"])
+    obs = _build_observations(ctx, space, "crystallinity")
+    assert len(obs) == 2                       # both literature rows became observations
+    assert {round(o.value, 2) for o in obs} == {0.65, 0.82}
+    ctx.store.close(); ctx.prior_store.close()
