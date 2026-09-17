@@ -486,6 +486,14 @@ def extract_protocol(
             return None
         if any(raw.get(k) is None for k in ("metric_name", "unit", "measurement_method")):
             return None
+        # Reject non-quantitative outcomes: a qualitative reading ("crystalline, confirmed by PXRD")
+        # gets coerced by the model into a fake numeric with unit "qualitative"/"n/a". That's not a
+        # data point -- keeping it seeds the GP with a meaningless 0.0. It stays a protocol, just not
+        # a measured outcome.
+        unit = str(raw.get("unit") or "").strip().lower()
+        if unit in ("", "qualitative", "n/a", "na", "none", "unknown", "not reported",
+                    "not specified", "arbitrary", "a.u.", "au"):
+            return None
         try:
             value = float(raw["value"])
         except (TypeError, ValueError, KeyError):

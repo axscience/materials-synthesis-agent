@@ -162,3 +162,21 @@ def test_extract_protocol_skips_malformed_outcomes_instead_of_crashing():
     assert candidate.measured_outcomes[0].value == 1457
     assert len(candidate.literature_experiments) == 1
     assert candidate.literature_experiments[0].outcome.value == 800
+
+
+def test_extract_protocol_rejects_qualitative_outcomes():
+    """A qualitative reading coerced into a fake numeric (crystallinity 0.0 'qualitative') is not a
+    data point and must not become a measured_outcome (it would seed the GP with a meaningless 0)."""
+    target, paper = make_target(), make_paper()
+    tool_input = {
+        "found_protocol": True,
+        "building_blocks": {"TAPB": {"value": "SMILES1", "excerpt": "TAPB node", "inferred": False}},
+        "measured_outcomes": [
+            {"metric_name": "crystallinity", "value": 0.0, "unit": "qualitative",
+             "measurement_method": "PXRD", "excerpt": "crystalline by PXRD", "inferred": False},
+            {"metric_name": "BET_surface_area", "value": 1400, "unit": "m2/g",
+             "measurement_method": "N2 adsorption", "excerpt": "BET 1400", "inferred": False},
+        ],
+    }
+    candidate = extract_protocol(target, paper, client=FakeClient(tool_input))
+    assert [o.metric_name for o in candidate.measured_outcomes] == ["BET_surface_area"]
