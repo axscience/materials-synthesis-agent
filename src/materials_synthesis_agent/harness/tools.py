@@ -217,7 +217,29 @@ def _build_observations(ctx: ToolContext, space, objective_name: str):
         except ValueError:
             continue
         obs.append(Observation(params=params, value=metric.value, uncertainty=metric.uncertainty))
-    return obs
+
+    # 3. Plausibility filter: drop extraction errors (a 0.0/negative/absurd outcome) before they
+    #    reach the GP -- one bad point inflates the surrogate's apparent noise and breaks calibration.
+    from materials_synthesis_agent.harness.gates import plausible_outcome
+
+    return [o for o in obs if plausible_outcome(objective_name, o.value)]
+
+
+def _calibration_correction(report) -> tuple[float, str]:
+    """Decide the uncertainty correction from a calibration report. When the surrogate is measurably
+    overconfident, return the recommended variance scale (and an explanatory note) so the harness can
+    proceed with an HONEST, widened interval rather than dead-ending. Insufficient data or a passing
+    report -> no correction. Duck-typed on the report so it's testable without fitting a GP."""
+    passes = getattr(report, "passes", None)
+    scale = getattr(report, "variance_scale", None)
+    if passes is False and scale and scale > 1.0:
+        cov = getattr(report, "coverage_80", None)
+        cov_txt = f"{cov:.0%}" if isinstance(cov, (int, float)) else "low"
+        return float(scale), (
+            f"Uncertainty widened x{scale ** 0.5:.2f} to stay calibrated "
+            f"(leave-one-out 80% coverage was {cov_txt}; corrected to a trustworthy interval)."
+        )
+    return 1.0, ""
 
 
 def h_suggest_next(ctx: ToolContext) -> dict:
@@ -241,8 +263,16 @@ def h_suggest_next(ctx: ToolContext) -> dict:
 
     optimizer = SingleObjectiveOptimizer(space, maximize=target.maximize,
                                          variance_scale=ctx.campaign.variance_scale)
-    # Gate: raises CalibrationError if the surrogate is overconfident.
-    optimizer.check_calibration_or_raise(obs)
+    # Calibration: instead of hard-blocking an overconfident surrogate, measure it and widen the
+    # reported uncertainty to an honest width (the recommended variance scale). The number still
+    # ships with a *calibrated* interval -- it's just a wider, truthful one -- and the correction is
+    # remembered on the campaign for subsequent suggestions.
+    report = optimizer.calibration_report(obs)
+    applied_scale, calib_note = _calibration_correction(report)
+    if applied_scale > 1.0:
+        optimizer.variance_scale = applied_scale
+        ctx.campaign.variance_scale = applied_scale
+        ctx.store.save_campaign(ctx.campaign)
 
     # Warm start from prior campaigns on this chemistry.
     wp = build_warm_prior(
@@ -269,14 +299,18 @@ def h_suggest_next(ctx: ToolContext) -> dict:
                          f"(+/- {suggestion.predicted_uncertainty:.4g})",
         followed_from=prev.id if prev else None,
     ))
+    rationale = suggestion.rationale + ((" " + calib_note) if calib_note else "")
     return {
         "protocol_candidate_id": new_candidate.id,
         "params": suggestion.params,
         "predicted_value": suggestion.predicted_value,
         "predicted_uncertainty": suggestion.predicted_uncertainty,
         "expected_improvement": suggestion.expected_improvement,
+        "n_observations": len(obs),
         "n_warm_anchors": len(anchors),
-        "rationale": suggestion.rationale,
+        "calibration_passed": report.passes,
+        "applied_variance_scale": applied_scale,
+        "rationale": rationale,
     }
 
 

@@ -62,3 +62,23 @@ def test_validate_smiles_degrades_gracefully_without_rdkit(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     assert validate_smiles("literally anything") is True
+
+
+# --- outcome plausibility (drops extraction errors before the GP sees them) ---
+from materials_synthesis_agent.harness.gates import plausible_outcome  # noqa: E402
+
+
+def test_plausible_outcome_rejects_zero_negative_nonfinite_none():
+    for bad in (0.0, -5, float("nan"), float("inf"), None):
+        assert plausible_outcome("BET_surface_area", bad) is False
+
+
+def test_plausible_outcome_accepts_in_range_rejects_absurd():
+    assert plausible_outcome("BET_surface_area", 1457) is True
+    assert plausible_outcome("BET surface area", 1457) is True   # name normalization
+    assert plausible_outcome("BET_surface_area", 99999) is False  # above ceiling
+
+
+def test_plausible_outcome_unknown_metric_requires_positive():
+    assert plausible_outcome("some_new_metric", 5) is True
+    assert plausible_outcome("some_new_metric", 0) is False

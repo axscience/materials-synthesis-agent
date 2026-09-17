@@ -178,3 +178,19 @@ def test_suggest_next_observations_seed_from_single_measured_outcomes(tmp_path):
     assert len(obs) == 2
     assert {round(o.value) for o in obs} == {1457, 800}
     ctx.store.close(); ctx.prior_store.close()
+
+
+def test_calibration_correction_widens_when_overconfident():
+    from types import SimpleNamespace
+    from materials_synthesis_agent.harness.tools import _calibration_correction
+    scale, note = _calibration_correction(SimpleNamespace(passes=False, variance_scale=5.8, coverage_80=0.6))
+    assert scale == 5.8
+    assert "widened" in note and "80%" in note
+
+
+def test_calibration_correction_noop_when_passing_or_insufficient():
+    from types import SimpleNamespace
+    from materials_synthesis_agent.harness.tools import _calibration_correction
+    assert _calibration_correction(SimpleNamespace(passes=True, variance_scale=1.1, coverage_80=0.82)) == (1.0, "")
+    assert _calibration_correction(SimpleNamespace(passes=None, variance_scale=None, coverage_80=None)) == (1.0, "")
+    assert _calibration_correction(SimpleNamespace(passes=False, variance_scale=None, coverage_80=0.5)) == (1.0, "")

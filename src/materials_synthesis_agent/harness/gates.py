@@ -43,6 +43,46 @@ class Gate(BaseModel):
         return cls(blocked=False, severity="warning", message=message, detail=detail)
 
 
+# Plausible ranges for common COF outcome metrics, used to drop extraction errors (a "not
+# reported" mis-parsed as 0.0, a negative surface area, an absurd value) before they poison the GP.
+# Versioned data, not magic constants: widen/add entries as new metrics appear. Keys are normalized
+# (lowercase, spaces/hyphens -> underscore).
+_PLAUSIBLE_BOUNDS: dict[str, tuple[float, float]] = {
+    "bet_surface_area": (1.0, 8000.0),      # m2/g; COFs top out ~5000-7000
+    "surface_area": (1.0, 8000.0),
+    "pore_volume": (0.0, 5.0),              # cm3/g
+    "total_pore_volume": (0.0, 5.0),
+    "pore_size": (0.0, 10.0),               # nm
+    "co2_uptake": (0.0, 2000.0),            # mg/g
+    "yield": (0.0, 100.0),                  # %
+    "yield_percent": (0.0, 100.0),
+    "crystallinity": (0.0, 100.0),          # fractional or %, both < 100
+}
+
+
+def plausible_outcome(metric_name: str, value) -> bool:
+    """True if `value` is a physically plausible measurement of `metric_name`. Rejects non-finite
+    values, and anything at or below the metric's floor (so a 0.0 surface area -- almost always a
+    mis-extraction of 'not reported' -- is dropped) or above its ceiling. Metrics with no known
+    bounds must simply be positive and finite: a measured property that comes out <= 0 is far more
+    likely an extraction error than a real datum."""
+    import math
+
+    if value is None:
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(v):
+        return False
+    key = metric_name.lower().replace(" ", "_").replace("-", "_")
+    if key in _PLAUSIBLE_BOUNDS:
+        lo, hi = _PLAUSIBLE_BOUNDS[key]
+        return lo < v <= hi
+    return v > 0
+
+
 def validate_smiles(smiles: str) -> bool:
     """True if RDKit can parse the SMILES. If RDKit is unavailable, we do not claim validity or
     invalidity -- the caller treats `None` as "not checked" (see _gate_extraction)."""
