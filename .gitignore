@@ -15,3 +15,7 @@ CLAUDE.md
 ARCHITECTURE.md
 ROADMAP.md
 CONTRIBUTING.md
+
+# harness frontend
+frontend/node_modules/
+frontend/dist/
