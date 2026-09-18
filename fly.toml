@@ -1,0 +1,38 @@
+# Fly.io deployment for the Discovery Harness API (the backend a Lovable front end calls).
+#   fly launch --no-deploy   # first time: claims the app name, keeps this file
+#   fly volumes create harness_data --size 1   # persistent per-tenant SQLite data
+#   fly secrets set ANTHROPIC_API_KEY=... AUTH_MODE=supabase SUPABASE_URL=... HARNESS_CORS_ORIGINS=...
+#   fly deploy
+app = "discovery-harness"          # change to a unique name (fly will tell you if it's taken)
+primary_region = "iad"             # pick one near you: iad, lhr, fra, sjc, syd, ...
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # PORT makes serve.py bind 0.0.0.0:8000 (see harness/serve.py); must match internal_port below.
+  PORT = "8000"
+  HARNESS_WORKSPACE = "/data"      # campaign/job data lives on the mounted volume
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Keep one machine always up: an in-process job (extraction) must survive; auto-stop could kill it.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/api/health"           # no auth required; confirms the app is serving
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"                    # torch/botorch need headroom; bump to 2gb if you see OOM
+
+[[mounts]]
+  source = "harness_data"
+  destination = "/data"
