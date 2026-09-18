@@ -11,6 +11,7 @@ of a live LLM -- the same discipline the rest of the codebase uses for provider 
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -21,6 +22,12 @@ from pydantic import BaseModel
 
 from materials_synthesis_agent.harness.auth import Tenant, current_tenant
 from materials_synthesis_agent.harness.campaign import Campaign, Session
+from materials_synthesis_agent.harness.jobs import (
+    Job,
+    JobRunner,
+    JobStatus,
+    ThreadJobRunner,
+)
 from materials_synthesis_agent.harness.planner import Planner, ToolCaller
 from materials_synthesis_agent.harness.session_export import session_to_markdown
 from materials_synthesis_agent.harness.store import CampaignStore
@@ -62,12 +69,20 @@ def _default_caller_factory() -> ToolCaller:
 def create_app(
     workspace: Path | str,
     caller_factory: Optional[Callable[[], ToolCaller]] = None,
+    runner: Optional[JobRunner] = None,
 ) -> FastAPI:
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     caller_factory = caller_factory or _default_caller_factory
+    # ThreadJobRunner in production; tests inject InlineJobRunner so a job is done on submit.
+    runner = runner or ThreadJobRunner()
 
-    app = FastAPI(title="Discovery Harness")
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        yield
+        runner.shutdown()
+
+    app = FastAPI(title="Discovery Harness", lifespan=_lifespan)
 
     # A Lovable/Supabase front end is served from a different origin, so it needs CORS. Lock this to
     # your front end's origin(s) in production via HARNESS_CORS_ORIGINS (comma-separated); the "*"
@@ -174,38 +189,94 @@ def create_app(
 
     # -- chat -------------------------------------------------------------
 
+    def _run_chat_job(tenant_id: str, campaign_id: str, job_id: str,
+                      session_id: str, message: str) -> None:
+        """Worker body (runs in the job runner's thread). Opens its OWN stores -- SQLite connections
+        are per-thread -- runs the planner loop (which persists the session), and writes the reply or
+        the error onto the job row. Never raises: a failure becomes an ERROR job the client can read."""
+        store = _store(tenant_id, campaign_id)
+        priors = _priors(tenant_id)
+        try:
+            job = store.get_job(job_id)
+            campaign = store.get_campaign(campaign_id)
+            if job is None or campaign is None:
+                return
+            job.status = JobStatus.RUNNING
+            store.save_job(job)
+
+            session = store.get_session(session_id) or Session(id=session_id, campaign_id=campaign_id)
+            # The Extractor role calls an LLM when a key is set; a fine-tuned extractor slots in via
+            # the same build_client seam later.
+            llm = None
+            key = os.environ.get("ANTHROPIC_API_KEY")
+            extract_model = os.environ.get("MATERIALS_AGENT_EXTRACT_MODEL", "claude-sonnet-4-6")
+            if key:
+                from materials_synthesis_agent.llm import build_client
+
+                llm = build_client("anthropic", key, extract_model)
+            ctx = ToolContext(
+                store=store, prior_store=priors, campaign=campaign,
+                llm=llm, model=extract_model,
+                unpaywall_email=os.environ.get("UNPAYWALL_EMAIL"),
+            )
+            planner = Planner(ctx, caller_factory())
+            reply = planner.respond(message, session)
+            last = session.turns[-1] if session.turns else None
+            job.reply = reply
+            job.tool_calls = last.tool_calls if last else []
+            job.status = JobStatus.DONE
+            store.save_job(job)
+            idx = _index(tenant_id); idx.save_campaign(campaign); idx.close()  # keep the sidebar fresh
+        except Exception as exc:  # noqa: BLE001 - surface the failure as an ERROR job, never crash the worker
+            job = store.get_job(job_id)
+            if job is not None:
+                job.status = JobStatus.ERROR
+                job.error = str(exc)
+                store.save_job(job)
+        finally:
+            store.close(); priors.close()
+
     @app.post("/api/campaigns/{campaign_id}/chat")
     def chat(campaign_id: str, body: ChatIn, tenant: Tenant = Depends(current_tenant)):
+        """Enqueue a chat turn and return immediately -- the planner loop (esp. extraction) runs too
+        long for an HTTP request. Poll GET .../jobs/{job_id} for the reply."""
         store = _store(tenant.id, campaign_id)
         campaign = store.get_campaign(campaign_id)
         if campaign is None:
             store.close()
             raise HTTPException(404, "No such campaign.")
-        priors = _priors(tenant.id)
-        session = (store.get_session(body.session_id) if body.session_id else None) \
-            or Session(campaign_id=campaign_id)
-        # Extraction runs an LLM (the Extractor role); give the context a client when a key is set.
-        # Design decision: closed model gets prompt-optimized use here; a fine-tuned extractor would
-        # slot in via the same build_client seam later.
-        llm = None
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        extract_model = os.environ.get("MATERIALS_AGENT_EXTRACT_MODEL", "claude-sonnet-4-6")
-        if key:
-            from materials_synthesis_agent.llm import build_client
+        # Fix the session id up front so the client can keep the thread; the worker reuses it.
+        session = (store.get_session(body.session_id) if body.session_id else None)
+        if session is None:
+            session = Session(campaign_id=campaign_id)
+            store.save_session(session)
+        job = Job(campaign_id=campaign_id, session_id=session.id, message=body.message)
+        store.save_job(job)
+        session_id, job_id = session.id, job.id
+        store.close()  # close before submitting; the worker opens its own connection
 
-            llm = build_client("anthropic", key, extract_model)
-        ctx = ToolContext(
-            store=store, prior_store=priors, campaign=campaign,
-            llm=llm, model=extract_model,
-            unpaywall_email=os.environ.get("UNPAYWALL_EMAIL"),
-        )
-        planner = Planner(ctx, caller_factory())
-        reply = planner.respond(body.message, session)
-        idx = _index(tenant.id); idx.save_campaign(campaign); idx.close()  # keep the sidebar fresh
-        last = session.turns[-1] if session.turns else None
-        store.close(); priors.close()
-        return {"reply": reply, "session_id": session.id,
-                "tool_calls": last.tool_calls if last else []}
+        runner.submit(lambda: _run_chat_job(tenant.id, campaign_id, job_id, session_id, body.message))
+        return {"job_id": job_id, "session_id": session_id, "status": JobStatus.QUEUED.value}
+
+    @app.get("/api/campaigns/{campaign_id}/jobs/{job_id}")
+    def get_job(campaign_id: str, job_id: str, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
+        job = store.get_job(job_id)
+        store.close()
+        if job is None or job.campaign_id != campaign_id:
+            raise HTTPException(404, "No such job.")
+        return {"job_id": job.id, "status": job.status.value, "session_id": job.session_id,
+                "reply": job.reply, "tool_calls": job.tool_calls, "error": job.error,
+                "updated_at": job.updated_at.isoformat()}
+
+    @app.get("/api/campaigns/{campaign_id}/jobs")
+    def list_jobs(campaign_id: str, tenant: Tenant = Depends(current_tenant)):
+        store = _store(tenant.id, campaign_id)
+        out = [{"job_id": j.id, "status": j.status.value, "kind": j.kind,
+                "message": j.message, "created_at": j.created_at.isoformat()}
+               for j in store.list_jobs(campaign_id)]
+        store.close()
+        return out
 
     # -- direct log-result form ------------------------------------------
 

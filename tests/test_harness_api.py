@@ -10,6 +10,7 @@ fastapi_testclient = pytest.importorskip("fastapi.testclient")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from materials_synthesis_agent.harness.api import create_app  # noqa: E402
+from materials_synthesis_agent.harness.jobs import InlineJobRunner  # noqa: E402
 from materials_synthesis_agent.harness.planner import PlannerResult  # noqa: E402
 
 
@@ -25,7 +26,9 @@ class _TextOnlyCaller:
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(tmp_path / "ws", caller_factory=lambda: _TextOnlyCaller())
+    # InlineJobRunner: chat jobs run synchronously on submit, so a job is `done` immediately.
+    app = create_app(tmp_path / "ws", caller_factory=lambda: _TextOnlyCaller(),
+                     runner=InlineJobRunner())
     return TestClient(app)
 
 
@@ -53,13 +56,18 @@ def test_get_missing_campaign_404(client):
     assert client.get("/api/campaigns/nope").status_code == 404
 
 
-def test_chat_runs_planner_and_persists_session(client):
+def test_chat_enqueues_job_and_persists_session(client):
     cid = _new_campaign(client)
     r = client.post(f"/api/campaigns/{cid}/chat", json={"message": "what should I try?"})
     assert r.status_code == 200
     body = r.json()
-    assert body["reply"] == "Here's what I found."
-    sid = body["session_id"]
+    assert body["status"] == "queued"          # returns immediately, non-blocking
+    job_id, sid = body["job_id"], body["session_id"]
+
+    # InlineJobRunner already ran it: poll the job for the reply.
+    job = client.get(f"/api/campaigns/{cid}/jobs/{job_id}").json()
+    assert job["status"] == "done"
+    assert job["reply"] == "Here's what I found."
 
     # The session was persisted and shows up in the list.
     sessions = client.get(f"/api/campaigns/{cid}/sessions").json()
@@ -69,6 +77,37 @@ def test_chat_runs_planner_and_persists_session(client):
     client.post(f"/api/campaigns/{cid}/chat", json={"message": "and after that?", "session_id": sid})
     sessions = client.get(f"/api/campaigns/{cid}/sessions").json()
     assert next(s for s in sessions if s["id"] == sid)["turns"] == 4  # 2 user + 2 assistant
+
+    # Jobs are listed newest-first for the campaign.
+    jobs = client.get(f"/api/campaigns/{cid}/jobs").json()
+    assert len(jobs) == 2 and jobs[0]["status"] == "done"
+
+
+def test_get_job_404_for_unknown(client):
+    cid = _new_campaign(client)
+    assert client.get(f"/api/campaigns/{cid}/jobs/nope").status_code == 404
+
+
+def test_chat_runs_on_a_real_worker_thread(tmp_path):
+    """End-to-end through ThreadJobRunner (the production path): enqueue, poll until done."""
+    import time
+
+    app = create_app(tmp_path / "ws", caller_factory=lambda: _TextOnlyCaller())  # default ThreadJobRunner
+    c = TestClient(app)
+    cid = _new_campaign(c)
+    enq = c.post(f"/api/campaigns/{cid}/chat", json={"message": "hi"}).json()
+    assert enq["status"] == "queued"
+    job_id = enq["job_id"]
+
+    deadline = time.time() + 10
+    status = "queued"
+    while time.time() < deadline:
+        job = c.get(f"/api/campaigns/{cid}/jobs/{job_id}").json()
+        status = job["status"]
+        if status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert status == "done" and job["reply"] == "Here's what I found."
 
 
 def test_log_result_endpoint_without_space(client):

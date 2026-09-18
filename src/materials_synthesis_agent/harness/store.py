@@ -15,6 +15,7 @@ from materials_synthesis_agent.harness.campaign import (
     CharacterizationResult,
     Session,
 )
+from materials_synthesis_agent.harness.jobs import Job
 from materials_synthesis_agent.storage.db import Store
 
 _CAMPAIGN_SCHEMA = """
@@ -37,8 +38,16 @@ CREATE TABLE IF NOT EXISTS characterizations (
     data          TEXT NOT NULL,
     created_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jobs (
+    id           TEXT PRIMARY KEY,
+    campaign_id  TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    data         TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_char_campaign ON characterizations(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_campaign ON jobs(campaign_id);
 """
 
 
@@ -91,3 +100,16 @@ class CampaignStore(Store):
         return self._list(
             "characterizations", CharacterizationResult, "campaign_id = ?", (campaign_id,)
         )
+
+    # -- jobs (async chat turns; see harness.jobs) ------------------------
+
+    def save_job(self, job: Job) -> None:
+        job.touch()
+        self._insert("jobs", job.id, {"campaign_id": job.campaign_id, "status": job.status.value}, job)
+
+    def get_job(self, id_: str) -> Job | None:
+        return self._get("jobs", id_, Job)
+
+    def list_jobs(self, campaign_id: str, limit: int = 20) -> list[Job]:
+        jobs = self._list("jobs", Job, "campaign_id = ?", (campaign_id,))
+        return sorted(jobs, key=lambda j: j.created_at, reverse=True)[:limit]

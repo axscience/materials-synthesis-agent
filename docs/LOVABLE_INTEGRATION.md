@@ -53,7 +53,9 @@ Base URL = your deployed backend. All paths are under `/api`. All bodies are JSO
 | POST | `/api/campaigns` | `CreateCampaign` | `{id, name}` |
 | GET | `/api/campaigns/{id}` | — | `{id, name, status, linkage_chemistry, space, target, session_ids}` |
 | GET | `/api/campaigns/{id}/state` | — | `{protocols[], experiments[], suggestions[], characterizations[]}` |
-| POST | `/api/campaigns/{id}/chat` | `{message, session_id?}` | `{reply, session_id, tool_calls[]}` |
+| POST | `/api/campaigns/{id}/chat` | `{message, session_id?}` | `{job_id, session_id, status}` (async — poll the job) |
+| GET | `/api/campaigns/{id}/jobs/{job_id}` | — | `{status, reply, tool_calls[], error, session_id}` |
+| GET | `/api/campaigns/{id}/jobs` | — | `[{job_id, status, kind, message, created_at}]` |
 | POST | `/api/campaigns/{id}/log` | `LogResult` | `{result, gate}` |
 | GET | `/api/campaigns/{id}/sessions` | — | `[{id, started_at, turns, cost}]` |
 | GET | `/api/campaigns/{id}/sessions/{sid}/export` | — | markdown (text/markdown) |
@@ -72,12 +74,19 @@ Base URL = your deployed backend. All paths are under `/api`. All bodies are JSO
 `name` is required; the rest are optional but, when `metric_name` + `linkage_chemistry` are given, a
 target is created so the loop can start immediately.
 
-**Chat** — this drives the whole loop. The user's message goes to the planner, which calls tools
-(extract protocols, derive space, suggest next, …). Response:
+**Chat (async)** — this drives the whole loop. The planner may run for minutes (extraction), so the
+call **enqueues a job and returns immediately**:
 ```json
-{ "reply": "…assistant text…", "session_id": "…", "tool_calls": [{"name": "opt.suggest_next", "…": "…"}] }
+{ "job_id": "…", "session_id": "…", "status": "queued" }
 ```
-Pass the returned `session_id` back on the next message to continue the conversation.
+Then **poll** `GET /api/campaigns/{id}/jobs/{job_id}` until `status` is `done` (or `error`):
+```json
+{ "status": "done", "reply": "…assistant text…",
+  "tool_calls": [{"name": "opt.suggest_next", "…": "…"}], "error": null, "session_id": "…" }
+```
+Poll every ~2s; show `tool_calls` as step chips while running. Pass the returned `session_id` back on
+the next message to continue the conversation. `error` is populated (and `status="error"`) if the run
+failed — show it to the user.
 
 **LogResult** — record a bench measurement so the next suggestion improves:
 ```json
@@ -107,15 +116,17 @@ system-of-record with RLS is the Phase-4 Postgres port — tracked separately; n
 > After login, call my backend API at `https://<your-backend>/api`, sending
 > `Authorization: Bearer <supabase access token>` on every request. Screens:
 > (1) a sidebar listing campaigns (`GET /api/campaigns`) with a "New campaign" form
-> (`POST /api/campaigns`); (2) a chat view per campaign (`POST /api/campaigns/{id}/chat`, echo the
-> assistant `reply` and show each `tool_calls` entry as a step chip); (3) a "results" panel reading
-> `GET /api/campaigns/{id}/state` (protocols, experiments, suggestions) and a "log a bench result"
-> form (`POST /api/campaigns/{id}/log`). Show `gate.blocked` messages as warnings. Keep it clean and
-> functional, not flashy.
+> (`POST /api/campaigns`); (2) a chat view per campaign: `POST /api/campaigns/{id}/chat` returns a
+> `job_id`; poll `GET /api/campaigns/{id}/jobs/{job_id}` every 2s until `status` is `done`, then show
+> `reply` and render each `tool_calls` entry as a step chip (spinner while `queued`/`running`, show
+> `error` if it fails); (3) a "results" panel reading `GET /api/campaigns/{id}/state` (protocols,
+> experiments, suggestions) and a "log a bench result" form (`POST /api/campaigns/{id}/log`). Show
+> `gate.blocked` messages as warnings. Keep it clean and functional, not flashy.
 
-## Known limitation to plan around
+## Scaling note
 
-The chat/extraction currently runs **synchronously** in the request. A full 100-paper extraction can
-take many minutes and will exceed typical HTTP timeouts. For real multi-user traffic, move it to a
-background job queue (Phase 4, P4.1) and have the front end poll a job-status endpoint. For a demo,
-keep extraction batches small (lower `search_limit`) so responses return promptly.
+Chat/extraction runs **asynchronously** (Phase 4, P4.1): the request enqueues a job and the front end
+polls, so a multi-minute extraction never times out. The default runner is an in-process thread pool
+— correct for a single container. When you outgrow one container, swap in a Redis/arq runner (it
+implements the same `submit` interface; nothing else changes). Jobs are stored per tenant alongside
+the campaign, so a poll always finds its result.
